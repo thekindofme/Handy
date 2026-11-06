@@ -17,6 +17,8 @@ mod languages;
 mod llm_client;
 mod managers;
 mod memory;
+#[cfg(target_os = "macos")]
+mod menubar;
 mod notices;
 mod overlay;
 mod paste_tx;
@@ -104,6 +106,12 @@ fn build_console_filter() -> env_filter::Filter {
 }
 
 fn show_main_window(app: &AppHandle) {
+    // The native menu bar UI has no window: its popover takes the window's place.
+    #[cfg(target_os = "macos")]
+    if menubar::enabled() {
+        menubar::open(app);
+        return;
+    }
     if let Some(main_window) = app.get_webview_window("main") {
         if let Err(e) = main_window.unminimize() {
             log::error!("Failed to unminimize webview window: {}", e);
@@ -160,7 +168,7 @@ fn apply_startup_activation_policy(app: &mut tauri::App, headless_mode: bool) {
     let should_hide = settings.start_hidden || cli_args.start_hidden;
     let tray_available = settings.show_tray_icon && !cli_args.no_tray;
 
-    if should_hide && tray_available {
+    if menubar::enabled() || (should_hide && tray_available) {
         log::info!("Starting hidden with tray available: launching as Accessory (no Dock icon)");
         app.set_activation_policy(tauri::ActivationPolicy::Accessory);
     }
@@ -281,7 +289,26 @@ fn initialize_core_logic(app_handle: &AppHandle) {
                 }
             });
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    if menubar::enabled() {
+        // Left click opens the menu bar popover; right click keeps the menu.
+        tray_builder = tray_builder
+            .show_menu_on_left_click(false)
+            .on_tray_icon_event(|tray, event| {
+                use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    menubar::on_tray_click(tray.app_handle());
+                }
+            });
+    } else {
+        tray_builder = tray_builder.show_menu_on_left_click(true);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         tray_builder = tray_builder.show_menu_on_left_click(true);
     }
@@ -393,7 +420,12 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     // tauri-plugin-autostart elsewhere)
     autostart::apply_autostart(app_handle, settings.autostart_enabled);
 
-    // Create the recording overlay window (hidden by default)
+    // Create the recording overlay window (hidden by default). The menu bar
+    // UI shows recording state on its icon instead of in a WebView overlay.
+    #[cfg(target_os = "macos")]
+    if menubar::enabled() {
+        return;
+    }
     utils::create_recording_overlay(app_handle);
 }
 
@@ -1015,11 +1047,19 @@ pub fn run(cli_args: CliArgs) {
                 not(any(target_os = "macos", target_os = "windows")),
                 allow(unused_variables)
             )]
+            #[cfg(not(target_os = "macos"))]
             let main_window = win_builder.build()?;
+            // The native menu bar UI never creates the WebView window.
+            #[cfg(target_os = "macos")]
+            let main_window = if menubar::enabled() {
+                None
+            } else {
+                Some(win_builder.build()?)
+            };
 
             // macOS draws the title bar inside the inner size; grow the window to fit it.
             #[cfg(target_os = "macos")]
-            {
+            if let Some(main_window) = &main_window {
                 let bar = utils::measure_title_bar(&main_window);
                 if bar > 0.0 {
                     let (width, height) = utils::MAIN_WINDOW_SIZE;
@@ -1082,6 +1122,11 @@ pub fn run(cli_args: CliArgs) {
 
             initialize_core_logic(&app_handle);
 
+            #[cfg(target_os = "macos")]
+            if menubar::enabled() {
+                menubar::install(&app_handle);
+            }
+
             // Secure Input monitor (macOS): detects stuck secure input that
             // silently blocks keyed shortcuts, warns the user, and activates
             // the Carbon fallback. See secure_input.rs and issue #1578.
@@ -1126,6 +1171,11 @@ pub fn run(cli_args: CliArgs) {
             // anyway. Without a tray icon, the dock is the only way back in.
             // Keep in sync with `apply_startup_activation_policy` (macOS).
             let tray_available = settings.show_tray_icon && !cli_args.no_tray;
+            // The menu bar UI opens itself on first run (see menubar::install).
+            #[cfg(target_os = "macos")]
+            let tray_available = tray_available || menubar::enabled();
+            #[cfg(target_os = "macos")]
+            let should_hide = should_hide || menubar::enabled();
             if should_force_show || !should_hide || !tray_available {
                 show_main_window(&app_handle);
             }

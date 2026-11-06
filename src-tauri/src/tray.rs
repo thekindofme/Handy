@@ -77,17 +77,17 @@ struct MenuInputs {
 /// What the language submenu shows: `(code, name)` entries, with codes as
 /// language identities, the spelling `selected_language` is saved in.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LanguageMenu {
+pub(crate) struct LanguageMenu {
     /// The checked entry: `auto` or a code.
-    active: String,
+    pub(crate) active: String,
     /// Auto works for this model and these languages. When it doesn't, or
     /// needs the detector download, it's shown greyed out, as in settings.
-    auto_enabled: bool,
+    pub(crate) auto_enabled: bool,
     /// The person's spoken languages the model hears, in their order, plus
     /// the active language when it isn't one of them.
-    main: Vec<(String, String)>,
+    pub(crate) main: Vec<(String, String)>,
     /// The model's other languages, by name, in an "Other Languages" submenu.
-    others: Vec<(String, String)>,
+    pub(crate) others: Vec<(String, String)>,
 }
 
 /// Complete description of what the tray should look like.
@@ -249,6 +249,13 @@ pub fn dictation_in_progress(app: &AppHandle) -> bool {
         .is_some_and(|state| state.lock().icon_state.is_busy())
 }
 
+/// The recording state the tray shows right now.
+pub fn icon_state(app: &AppHandle) -> TrayIconState {
+    app.try_state::<TrayState>()
+        .map(|state| state.lock().icon_state)
+        .unwrap_or(TrayIconState::Idle)
+}
+
 /// Re-syncs the tray after something other than the recording state changed
 /// (theme, Secure Input warning, notices). The recording state itself is
 /// preserved.
@@ -401,7 +408,7 @@ fn compute_desired(app: &AppHandle, icon_state: TrayIconState) -> TrayDesired {
 /// The language submenu for `model`, mirroring the settings window's picker:
 /// what's checked is what transcription will use. `None` when there's
 /// nothing to choose between.
-fn language_menu(
+pub(crate) fn language_menu(
     settings: &settings::AppSettings,
     model: &ModelInfo,
     detector_ready: bool,
@@ -510,6 +517,9 @@ fn language_submenu(
 }
 
 fn post_apply(app: &AppHandle) {
+    // The menu bar popover shows the same state; redraw it if it's open.
+    #[cfg(target_os = "macos")]
+    crate::menubar::request_refresh(app);
     let handle = app.clone();
     if let Err(err) = app.run_on_main_thread(move || apply_on_main(&handle)) {
         // Event loop is gone (shutdown). Clear `pending` so a later call, if

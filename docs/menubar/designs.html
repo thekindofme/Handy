@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Handy menu bar designs</title>
+<style>
+  :root { --bg:#e9e9ee; --panel:rgba(246,246,248,.97); --line:#d6d6db; --text:#1d1d1f; --muted:#6e6e73; --accent:#0a84ff; --red:#ff3b30; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:linear-gradient(160deg,#a9c2e8,#d9c6e8 55%,#f1d7c8); font:13px -apple-system, "SF Pro Text", system-ui, sans-serif; color:var(--text); padding:28px; width:1440px; }
+  h1 { font-size:22px; margin:0 0 4px; } .sub{color:#333;margin:0 0 20px}
+  .row { display:flex; gap:28px; align-items:flex-start; }
+  .col { width:448px; }
+  .col h2 { font-size:16px; margin:0 0 2px; } .col .tag{font-size:12px;color:#333;margin-bottom:10px}
+  .bar { height:26px; background:rgba(255,255,255,.55); backdrop-filter:blur(20px); border-radius:6px 6px 0 0; display:flex; justify-content:flex-end; align-items:center; gap:14px; padding:0 12px; font-size:12px; }
+  .bar .hand { background:rgba(0,0,0,.14); border-radius:4px; padding:1px 6px; }
+  .stage { background:rgba(255,255,255,.25); border-radius:0 0 10px 10px; padding:6px 10px 16px; min-height:640px; position:relative; }
+  .menu { background:var(--panel); border:.5px solid rgba(0,0,0,.18); border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.25); padding:5px; width:290px; margin-left:auto; }
+  .mi { padding:4px 10px; border-radius:5px; display:flex; justify-content:space-between; } .mi.hl{background:var(--accent);color:#fff}
+  .sep { height:1px; background:var(--line); margin:5px 8px; } .hdr{font-size:11px;color:var(--muted);padding:4px 10px 2px;font-weight:600}
+  .sub2 { position:absolute; right:300px; top:118px; width:200px; }
+  .pop { background:var(--panel); border:.5px solid rgba(0,0,0,.18); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.25); width:360px; margin-left:auto; position:relative; }
+  .pop:before { content:""; position:absolute; top:-7px; right:58px; width:14px; height:14px; background:var(--panel); transform:rotate(45deg); border-left:.5px solid rgba(0,0,0,.18); border-top:.5px solid rgba(0,0,0,.18); }
+  .status { display:flex; gap:10px; align-items:center; padding:14px 14px 10px; }
+  .dot { width:34px; height:34px; border-radius:9px; background:#e5e5ea; display:grid; place-items:center; font-size:18px; }
+  .big { font-weight:600; font-size:14px } .muted{color:var(--muted);font-size:12px}
+  .btn { background:var(--accent); color:#fff; border-radius:7px; padding:5px 12px; font-weight:500; margin-left:auto; }
+  .btn.sec { background:#e3e3e8; color:var(--text); }
+  .seg { display:flex; margin:0 14px 10px; background:#e3e3e8; border-radius:7px; padding:2px; }
+  .seg div { flex:1; text-align:center; padding:3px 0; border-radius:5px; font-size:12px } .seg .on{background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.15)}
+  .grp { margin:0 14px 10px; background:#fff; border-radius:8px; border:.5px solid var(--line); }
+  .grp .r { display:flex; justify-content:space-between; align-items:center; padding:7px 10px; border-bottom:.5px solid var(--line); } .grp .r:last-child{border:0}
+  .sw { width:28px; height:16px; background:#34c759; border-radius:9px; position:relative } .sw:after{content:"";position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff} .sw.off{background:#d1d1d6}.sw.off:after{right:auto;left:2px}
+  .pp { background:#fff; border:.5px solid #c7c7cc; border-radius:5px; padding:1px 8px; font-size:12px; box-shadow:0 .5px 1px rgba(0,0,0,.1) }
+  .foot { display:flex; justify-content:space-between; padding:8px 14px 12px; color:var(--muted); font-size:12px; }
+  .hist { padding:6px 10px; border-bottom:.5px solid var(--line); } .hist:last-child{border:0} .hist .t{font-size:12px} .hist .m{font-size:11px;color:var(--muted)}
+  .cc { background:var(--panel); border:.5px solid rgba(0,0,0,.18); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.25); padding:10px; width:320px; margin-left:auto; }
+  .cc .tile { background:#fff; border-radius:9px; padding:8px 10px; margin-bottom:8px; display:flex; align-items:center; gap:10px; }
+  .circle { width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:13px } .circle.g{background:#d1d1d6;color:#333}
+  .panel { margin:10px 0 0 auto; width:420px; background:#fff; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.25); border:.5px solid rgba(0,0,0,.18); }
+  .panel .tb { height:28px; border-bottom:.5px solid var(--line); display:flex; align-items:center; gap:6px; padding:0 10px } .l{width:11px;height:11px;border-radius:50%;background:#ff5f57}.l2{background:#febc2e}.l3{background:#28c840}
+  .score { margin-top:12px; background:rgba(255,255,255,.75); border-radius:10px; padding:10px 12px; font-size:12px; }
+  .score b{display:inline-block;width:150px} .pick { outline:3px solid #34c759; border-radius:12px; }
+  .chip{display:inline-block;background:#34c759;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;margin-left:6px}
+</style>
+</head>
+<body>
+<h1>Handy, menu bar only: three directions</h1>
+<p class="sub">Each design drops the 680×570 WebView settings window. Every surface is drawn by AppKit from Rust (objc2), so no WebKit process runs. Right-click on the menu bar icon keeps the upstream quick menu.</p>
+<div class="row">
+
+<!-- A -->
+<div class="col">
+  <h2>A · Native Menu Plus</h2><div class="tag">All of it in one NSMenu with submenus</div>
+  <div class="bar"><span>⌁</span><span class="hand">✋</span><span>Fri 6 Nov 11:24</span></div>
+  <div class="stage">
+    <div class="menu">
+      <div class="hdr">HANDY · READY</div>
+      <div class="mi"><span>Start Dictation</span><span class="muted">⌥Space</span></div>
+      <div class="mi"><span>Copy Last Transcript</span></div>
+      <div class="sep"></div>
+      <div class="mi hl"><span>Recent Transcripts</span><span>›</span></div>
+      <div class="mi"><span>Model: Parakeet V3</span><span>›</span></div>
+      <div class="mi"><span>Language: Auto</span><span>›</span></div>
+      <div class="mi"><span>Microphone: Default</span><span>›</span></div>
+      <div class="mi"><span>Shortcut Mode</span><span>›</span></div>
+      <div class="sep"></div>
+      <div class="mi"><span>✓ Sound Effects</span></div>
+      <div class="mi"><span>✓ Launch at Login</span></div>
+      <div class="mi"><span>&nbsp;&nbsp;Translate to English</span></div>
+      <div class="mi"><span>Paste Method</span><span>›</span></div>
+      <div class="mi"><span>Advanced</span><span>›</span></div>
+      <div class="sep"></div>
+      <div class="mi"><span>About Handy 0.10.0</span></div>
+      <div class="mi"><span>Quit Handy</span><span class="muted">⌘Q</span></div>
+    </div>
+    <div class="menu sub2">
+      <div class="mi"><span>“Ship the build tonight…”</span></div>
+      <div class="mi"><span>“Remind me to call…”</span></div>
+      <div class="mi"><span>“The quick brown fox…”</span></div>
+    </div>
+  </div>
+  <div class="score">
+    <b>Memory / CPU</b> ★★★★★ (only NSMenu)<br>
+    <b>Covers all features</b> ★★☆☆☆ no text entry, no shortcut capture, no download progress<br>
+    <b>Multi-step edits</b> ★☆☆☆☆ menu closes on every click<br>
+    <b>macOS fit</b> ★★★★☆ &nbsp; <b>Code size</b> ★★★★★
+  </div>
+</div>
+
+<!-- B -->
+<div class="col">
+  <h2>B · Popover Control Center <span class="chip">picked</span></h2><div class="tag">NSPopover on the status item, with tabs inside</div>
+  <div class="bar"><span>⌁</span><span class="hand">✋</span><span>Fri 6 Nov 11:24</span></div>
+  <div class="stage pick">
+    <div class="pop" style="margin-top:8px">
+      <div class="status"><div class="dot">✋</div><div><div class="big">Ready</div><div class="muted">Parakeet V3 · hold ⌥Space</div></div><div class="btn">Dictate</div></div>
+      <div class="seg"><div class="on">Home</div><div>History</div><div>Models</div><div>Settings</div></div>
+      <div class="grp">
+        <div class="r"><span>Microphone</span><span class="pp">MacBook Air Microphone ⌄</span></div>
+        <div class="r"><span>Language</span><span class="pp">Auto ⌄</span></div>
+        <div class="r"><span>Shortcut</span><span class="pp">⌥ Space</span></div>
+        <div class="r"><span>Push to talk</span><span class="sw"></span></div>
+        <div class="r"><span>Sound effects</span><span class="sw off"></span></div>
+      </div>
+      <div class="muted" style="padding:0 14px 4px">LATEST</div>
+      <div class="grp">
+        <div class="hist"><div class="t">Ship the build tonight and send the notes in the morning.</div><div class="m">11:21 pm · Copy</div></div>
+        <div class="hist"><div class="t">Remind me to call the plumber about the kitchen tap.</div><div class="m">10:02 pm · Copy</div></div>
+      </div>
+      <div class="foot"><span>Handy 0.10.0</span><span>Quit ⌘Q</span></div>
+    </div>
+  </div>
+  <div class="score">
+    <b>Memory / CPU</b> ★★★★★ views built only while open, freed on close<br>
+    <b>Covers all features</b> ★★★★★ text fields, shortcut capture, progress<br>
+    <b>Multi-step edits</b> ★★★★★ stays open until you click away or press Esc<br>
+    <b>macOS fit</b> ★★★★★ like Tailscale, iStat Menus &nbsp; <b>Code size</b> ★★★☆☆
+  </div>
+</div>
+
+<!-- C -->
+<div class="col">
+  <h2>C · Control Centre modules + panel</h2><div class="tag">Wi‑Fi-style menu tiles, Settings… opens a native panel</div>
+  <div class="bar"><span>⌁</span><span class="hand">✋</span><span>Fri 6 Nov 11:24</span></div>
+  <div class="stage">
+    <div class="cc">
+      <div class="tile"><div class="circle">✋</div><div style="flex:1"><div class="big">Handy</div><div class="muted">Ready · Parakeet V3</div></div><span class="sw"></span></div>
+      <div class="tile"><div class="circle g">🎙</div><div style="flex:1">MacBook Air Microphone</div><span>›</span></div>
+      <div class="tile"><div class="circle g">文</div><div style="flex:1">Language · Auto</div><span>›</span></div>
+      <div class="tile"><div class="circle g">⧉</div><div style="flex:1">Copy last transcript</div></div>
+      <div class="mi"><span>Settings…</span></div>
+    </div>
+    <div class="panel">
+      <div class="tb"><span class="l"></span><span class="l l2"></span><span class="l l3"></span><span class="muted" style="margin-left:8px">Handy Settings</span></div>
+      <div class="grp" style="margin:10px">
+        <div class="r"><span>Shortcut</span><span class="pp">⌥ Space</span></div>
+        <div class="r"><span>Model</span><span class="pp">Parakeet V3 ⌄</span></div>
+        <div class="r"><span>Paste method</span><span class="pp">Ctrl+V ⌄</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="score">
+    <b>Memory / CPU</b> ★★★★☆ &nbsp;(extra window)<br>
+    <b>Covers all features</b> ★★★★☆ but settings move to a separate window<br>
+    <b>Multi-step edits</b> ★★★☆☆ custom views inside NSMenu have tracking quirks<br>
+    <b>macOS fit</b> ★★★★★ for the tiles, ★★★☆☆ overall &nbsp; <b>Code size</b> ★★☆☆☆
+  </div>
+</div>
+</div>
+</body>
+</html>
