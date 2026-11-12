@@ -131,6 +131,12 @@ func check(_ name: String, _ body: () throws -> String?) -> Bool {
     do { message = try body() } catch { message = "threw \(error)" }
     let ok = message == nil
     if ok { passed += 1 } else { failed += 1 }
+    if !ok {
+        // Why it failed: is the popover still up, and who has focus?
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+        let alive = NSRunningApplication(processIdentifier: pid).map { !$0.isTerminated } ?? false
+        message! += " [popover open: \(popoverOpen()), frontmost: \(front), app alive: \(alive)]"
+    }
     let r = Result(
         section: section, name: name, passed: ok, detail: message ?? "ok",
         seconds: Date().timeIntervalSince(started))
