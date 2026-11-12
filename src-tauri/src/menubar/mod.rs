@@ -326,6 +326,41 @@ fn after_setup_step(app: &AppHandle) {
     }
 }
 
+/// Runs a slow setter on a worker thread, then redraws.
+fn in_background(
+    app: &AppHandle,
+    f: impl FnOnce(&AppHandle) -> Result<(), String> + Send + 'static,
+) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = f(&app) {
+            warn!("Menu bar action failed: {e}");
+            flash(&app, e);
+        }
+        request_refresh(&app);
+    });
+}
+
+/// `AVAuthorizationStatusNotDetermined`: the system prompt can still be shown.
+const MIC_NOT_DETERMINED: isize = 0;
+
+/// `AVCaptureDevice.authorizationStatus(for: .audio)`.
+fn microphone_status() -> isize {
+    use objc2::{class, msg_send};
+    let audio = objc2_foundation::NSString::from_str("soun");
+    unsafe { msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: &*audio] }
+}
+
+fn open_privacy_pane(anchor: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(format!(
+            "x-apple.systempreferences:com.apple.preference.security?{anchor}"
+        ))
+        .status()
+        .map(|_| ())
+        .map_err(|e| format!("Couldn't open System Settings: {e}"))
+}
+
 fn set_bool(app: &AppHandle, key: BoolKey, on: bool) -> Result<(), String> {
     use crate::shortcut as sc;
     let a = app.clone();
@@ -571,9 +606,16 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
             Ok(())
         }
         Action::RequestMicrophone => {
-            let r = tauri::async_runtime::block_on(
-                tauri_plugin_macos_permissions::request_microphone_permission(),
-            );
+            // macOS asks only once. After a "Don't Allow" the request is
+            // silently ignored, so send the person to the setting instead.
+            let r = if microphone_status() == MIC_NOT_DETERMINED {
+                tauri::async_runtime::block_on(
+                    tauri_plugin_macos_permissions::request_microphone_permission(),
+                )
+            } else {
+                flash(app, "Turn on Handy in Privacy & Security › Microphone.");
+                open_privacy_pane("Privacy_Microphone")
+            };
             watch_permissions(app);
             r
         }
@@ -585,6 +627,16 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
             Ok(())
         }
         Action::SetBool(key, on) => set_bool(app, key, on),
+        // Switching audio devices restarts the audio stream, which can block
+        // for a while: keep it off the main thread so the popover stays live.
+        Action::SetChoice(key @ (ChoiceKey::Microphone | ChoiceKey::OutputDevice), value) => {
+            in_background(app, move |a| set_choice(a, key, value));
+            Ok(())
+        }
+        Action::SetBool(BoolKey::AlwaysOnMicrophone, on) => {
+            in_background(app, move |a| set_bool(a, BoolKey::AlwaysOnMicrophone, on));
+            Ok(())
+        }
         Action::SetChoice(key, value) => {
             let r = set_choice(app, key, value);
             if matches!(key, ChoiceKey::Language) {

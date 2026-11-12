@@ -10,8 +10,10 @@ use super::view::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
+use objc2::runtime::ProtocolObject;
 use objc2::Message;
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::NSPopoverDelegate;
 use objc2_app_kit::{
     NSApplication, NSBox, NSBoxType, NSButton, NSColor, NSControlSize, NSFont, NSImage,
     NSImageView, NSLayoutAttribute, NSLayoutConstraint, NSLineBreakMode, NSPopUpButton, NSPopover,
@@ -20,9 +22,11 @@ use objc2_app_kit::{
     NSTextField, NSTitlePosition, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
 };
 use objc2_foundation::{
-    NSArray, NSEdgeInsets, NSObject, NSPoint, NSRect, NSRectEdge, NSSize, NSString,
+    NSArray, NSEdgeInsets, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRectEdge,
+    NSSize, NSString,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 const WIDTH: f64 = 380.0;
@@ -52,6 +56,10 @@ struct Ui {
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
+    /// When the popover last closed. A click on the menu bar icon closes a
+    /// transient popover before our click handler runs; without this the same
+    /// click would open it again.
+    static LAST_CLOSED: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 const GEN_STRIDE: isize = 100_000;
@@ -67,6 +75,19 @@ define_class!(
         #[unsafe(method(perform:))]
         fn perform(&self, sender: &NSView) {
             on_control(sender);
+        }
+    }
+
+    unsafe impl NSObjectProtocol for Target {}
+
+    unsafe impl NSPopoverDelegate for Target {
+        #[unsafe(method(popoverDidClose:))]
+        fn popover_did_close(&self, _notification: &NSNotification) {
+            LAST_CLOSED.with(|c| c.set(Some(Instant::now())));
+            // Frees the views on a later turn (see `refresh`).
+            if let Some(app) = UI.with(|cell| cell.try_borrow().ok().and_then(|ui| ui.as_ref().map(|u| u.app.clone()))) {
+                super::request_refresh(&app);
+            }
         }
     }
 );
@@ -151,6 +172,7 @@ fn ensure_ui(app: &AppHandle, mtm: MainThreadMarker) {
         vc.setView(&root);
         popover.setContentViewController(Some(&vc));
         let target: Retained<Target> = unsafe { msg_send![Target::alloc(mtm), init] };
+        popover.setDelegate(Some(ProtocolObject::from_ref(&*target)));
         *cell.borrow_mut() = Some(Ui {
             app: app.clone(),
             popover,
@@ -173,11 +195,18 @@ fn is_shown() -> bool {
 }
 
 pub fn toggle(app: &AppHandle) {
+    let just_closed = LAST_CLOSED
+        .with(|c| c.get())
+        .is_some_and(|t| t.elapsed() < Duration::from_millis(400));
     if is_shown() {
         close();
-    } else {
+    } else if !just_closed {
         show(app);
     }
+}
+
+fn popover() -> Option<Retained<NSPopover>> {
+    UI.with(|cell| cell.borrow().as_ref().map(|ui| ui.popover.clone()))
 }
 
 pub fn show(app: &AppHandle) {
@@ -194,28 +223,28 @@ pub fn show(app: &AppHandle) {
     let app_ns = NSApplication::sharedApplication(mtm);
     #[allow(deprecated)]
     app_ns.activateIgnoringOtherApps(true);
-    UI.with(|cell| {
-        if let Some(ui) = cell.borrow().as_ref() {
-            if !ui.popover.isShown() {
-                ui.popover.showRelativeToRect_ofView_preferredEdge(
-                    button.bounds(),
-                    &button,
-                    NSRectEdge::MinY,
-                );
-            }
-            if let Some(window) = ui.root.window() {
-                window.makeKeyWindow();
-            }
+    // Called outside the UI borrow: showing and closing call our delegate.
+    if let Some(popover) = popover() {
+        if !popover.isShown() {
+            popover.showRelativeToRect_ofView_preferredEdge(
+                button.bounds(),
+                &button,
+                NSRectEdge::MinY,
+            );
         }
-    });
+        if let Some(window) = popover
+            .contentViewController()
+            .and_then(|vc| vc.view().window())
+        {
+            window.makeKeyWindow();
+        }
+    }
 }
 
 fn close() {
-    UI.with(|cell| {
-        if let Some(ui) = cell.borrow().as_ref() {
-            ui.popover.close();
-        }
-    });
+    if let Some(popover) = popover() {
+        popover.close();
+    }
     release_views();
 }
 
@@ -557,6 +586,8 @@ impl Builder<'_> {
                     14.0,
                 );
                 let l: Retained<NSView> = upcast(&*label(mtm, text, 12.0, false, true));
+                // Stack views aren't accessibility elements; tag the label.
+                set_identifier(&l, &row.id);
                 let s = stack(mtm, false, 4.0, &[check, l]);
                 upcast(&*s)
             }
@@ -574,6 +605,7 @@ impl Builder<'_> {
         let mut text: Vec<Retained<NSView>> = vec![upcast(&*title)];
         if let Some(detail) = &row.detail {
             let d = label(mtm, detail, 11.0, false, true);
+            set_identifier(&d, &format!("{}.detail", row.id));
             text.push(upcast(&*d));
         }
         let texts = stack(mtm, true, 1.0, &text);
@@ -623,6 +655,8 @@ impl Builder<'_> {
         card.setContentViewMargins(NSSize::new(0.0, 0.0));
         card.setContentView(Some(&body));
         no_autoresize(&card);
+        // NSBox doesn't size an Auto Layout content view by itself.
+        pin_all(&body, &card);
         let card: Retained<NSView> = upcast(&*card);
         match title {
             Some(t) => {

@@ -323,7 +323,17 @@ pub fn pretty_shortcut(binding: &str) -> String {
     binding
         .split('+')
         .filter(|p| !p.is_empty())
-        .map(|part| match part.to_ascii_lowercase().as_str() {
+        .map(|part| {
+            let lower = part.to_ascii_lowercase();
+            // handy-keys can name the side: "ctrl_left", "option_right".
+            let side_free = lower
+                .strip_suffix("_left")
+                .or_else(|| lower.strip_suffix("_right"))
+                .unwrap_or(&lower)
+                .to_string();
+            (part, side_free)
+        })
+        .map(|(part, lower)| match lower.as_str() {
             "option" | "alt" | "option_left" | "option_right" => "⌥".to_string(),
             "command" | "cmd" | "super" | "meta" | "command_left" | "command_right" => {
                 "⌘".to_string()
@@ -1264,6 +1274,8 @@ mod tests {
         assert_eq!(pretty_shortcut("ctrl+shift+d"), "⌃ ⇧ D");
         assert_eq!(pretty_shortcut("command+f13"), "⌘ F13");
         assert_eq!(pretty_shortcut("fn"), "fn");
+        assert_eq!(pretty_shortcut("ctrl_left+shift_left+k"), "⌃ ⇧ K");
+        assert_eq!(pretty_shortcut("option_right+space"), "⌥ Space");
         assert_eq!(pretty_shortcut(""), "Not set");
     }
 

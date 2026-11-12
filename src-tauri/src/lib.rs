@@ -859,12 +859,14 @@ pub fn run(cli_args: CliArgs) {
         ]);
 
     #[cfg(debug_assertions)] // <- Only export on non-release builds
-    specta_builder
-        .export(
-            Typescript::default().bigint(BigIntExportBehavior::Number),
-            "../src/bindings.ts",
-        )
-        .expect("Failed to export typescript bindings");
+    // A debug app opened from Finder runs with cwd "/", where this path
+    // can't be written; that shouldn't stop the app.
+    if let Err(e) = specta_builder.export(
+        Typescript::default().bigint(BigIntExportBehavior::Number),
+        "../src/bindings.ts",
+    ) {
+        log::warn!("Skipped exporting TypeScript bindings: {e}");
+    }
 
     let invoke_handler = specta_builder.invoke_handler();
 
@@ -1122,15 +1124,15 @@ pub fn run(cli_args: CliArgs) {
 
             initialize_core_logic(&app_handle);
 
-            #[cfg(target_os = "macos")]
-            if menubar::enabled() {
-                menubar::install(&app_handle);
-            }
-
             // Secure Input monitor (macOS): detects stuck secure input that
             // silently blocks keyed shortcuts, warns the user, and activates
             // the Carbon fallback. See secure_input.rs and issue #1578.
             secure_input::init(&app_handle);
+
+            #[cfg(target_os = "macos")]
+            if menubar::enabled() {
+                menubar::install(&app_handle);
+            }
 
             // Populate the overlay-enabled cache from initial settings so the
             // audio path (overlay::emit_levels, called ~24 Hz during recording)
