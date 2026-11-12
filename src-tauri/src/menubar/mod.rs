@@ -455,7 +455,20 @@ fn download(app: &AppHandle, model_id: String) {
 }
 
 fn start_capture(app: &AppHandle) -> Result<(), String> {
-    crate::shortcut::handy_keys::start_handy_keys_recording(app.clone(), "transcribe".into())?;
+    // The key listener starts once Accessibility is granted; if that just
+    // happened, start it now rather than failing.
+    if !permissions().1 {
+        return Err("Allow Accessibility access first, then try again.".into());
+    }
+    start_input(app);
+    crate::shortcut::handy_keys::start_handy_keys_recording(app.clone(), "transcribe".into())
+        .map_err(|e| {
+            if e.contains("secure-input") {
+                "Another app is using secure input (a password field), so keys can't be read right now.".to_string()
+            } else {
+                format!("Couldn't start recording a shortcut: {e}")
+            }
+        })?;
     if let Some(s) = state(app) {
         let mut inner = s.lock();
         inner.capture = Some(Capture::new());

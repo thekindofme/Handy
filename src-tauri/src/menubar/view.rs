@@ -602,6 +602,19 @@ fn shortcut_row(s: &Snapshot, tab: &str) -> Row {
             )]),
         )
         .detail(held)
+    } else if !s.accessibility_permission {
+        // The global key listener needs Accessibility; until then the
+        // shortcut can't fire or be changed, so the button leads to the fix.
+        Row::new(
+            id.clone(),
+            "Shortcut",
+            Control::Buttons(vec![button(
+                format!("{id}.change"),
+                &pretty_shortcut(&transcribe_binding(s)),
+                Action::RequestAccessibility,
+            )]),
+        )
+        .detail("Needs Accessibility access")
     } else {
         let binding = transcribe_binding(s);
         let is_default = s
@@ -1587,6 +1600,18 @@ mod tests {
         let r = row(&screen, "settings.shortcut");
         assert_eq!(r.detail.as_deref(), Some("⌘ ⇧"));
         assert!(actions(&screen).contains(&Action::CancelShortcutCapture));
+    }
+
+    #[test]
+    fn the_shortcut_asks_for_accessibility_first() {
+        let mut s = ready();
+        s.accessibility_permission = false;
+        let screen = build(&s, Tab::Home);
+        let r = row(&screen, "home.shortcut");
+        assert_eq!(r.detail.as_deref(), Some("Needs Accessibility access"));
+        let acts = actions(&screen);
+        assert!(acts.contains(&Action::RequestAccessibility));
+        assert!(!acts.contains(&Action::StartShortcutCapture));
     }
 
     #[test]
