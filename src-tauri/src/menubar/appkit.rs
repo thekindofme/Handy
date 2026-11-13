@@ -15,7 +15,7 @@ use objc2::Message;
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::NSPopoverDelegate;
 use objc2_app_kit::{
-    NSApplication, NSBox, NSBoxType, NSButton, NSColor, NSControlSize, NSFont, NSImage,
+    NSApplication, NSBox, NSBoxType, NSButton, NSColor, NSControlSize, NSEvent, NSFont, NSImage,
     NSImageView, NSLayoutAttribute, NSLayoutConstraint, NSLineBreakMode, NSPopUpButton, NSPopover,
     NSPopoverBehavior, NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView,
     NSSegmentSwitchTracking, NSSegmentedControl, NSStackView, NSStackViewDistribution, NSSwitch,
@@ -27,6 +27,7 @@ use objc2_foundation::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
@@ -52,6 +53,7 @@ struct Tree {
     /// reset whenever this tree comes back on screen.
     tabs: Retained<NSView>,
     scroll: Retained<NSScrollView>,
+    progress: ProgressViews,
     slots: Vec<Slot>,
     /// Tags carry this so a control from a replaced tree can't fire.
     generation: isize,
@@ -79,6 +81,14 @@ thread_local! {
 
 const GEN_STRIDE: isize = 100_000;
 
+/// Whether the popover is open; read from any thread so closed-popover
+/// refreshes cost nothing.
+static OPEN: AtomicBool = AtomicBool::new(false);
+
+pub fn is_open() -> bool {
+    OPEN.load(Ordering::SeqCst)
+}
+
 define_class!(
     /// The single target every control sends `perform:` to.
     #[unsafe(super(NSObject))]
@@ -99,9 +109,16 @@ define_class!(
         #[unsafe(method(popoverDidClose:))]
         fn popover_did_close(&self, _notification: &NSNotification) {
             LAST_CLOSED.with(|c| c.set(Some(Instant::now())));
-            // Frees the views on a later turn (see `refresh`).
+            OPEN.store(false, Ordering::SeqCst);
+            // Frees the views on a later turn, once AppKit is done with them.
             if let Some(app) = UI.with(|cell| cell.try_borrow().ok().and_then(|ui| ui.as_ref().map(|u| u.app.clone()))) {
-                super::request_refresh(&app);
+                std::thread::spawn(move || {
+                    let _ = app.run_on_main_thread(|| {
+                        if !OPEN.load(Ordering::SeqCst) {
+                            release_views();
+                        }
+                    });
+                });
             }
         }
     }
@@ -286,21 +303,26 @@ pub fn show(app: &AppHandle) {
             window.orderFrontRegardless();
             window.makeKeyWindow();
         }
+        OPEN.store(popover.isShown(), Ordering::SeqCst);
     }
     prebuild_other_tabs(app);
 }
 
+/// Views are released by the delegate once the close animation is done, so
+/// the popover doesn't blank while it fades.
 fn close() {
     if let Some(popover) = popover() {
         popover.close();
     }
-    release_views();
 }
 
 /// Drops the view tree so a closed popover holds no memory beyond itself.
 fn release_views() {
     UI.with(|cell| {
-        if let Some(ui) = cell.borrow_mut().as_mut() {
+        let Ok(mut guard) = cell.try_borrow_mut() else {
+            return;
+        };
+        if let Some(ui) = guard.as_mut() {
             for sub in ui.root.subviews().iter() {
                 sub.removeFromSuperview();
             }
@@ -325,11 +347,30 @@ pub fn refresh(app: &AppHandle) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    if is_shown() {
-        rebuild(app, mtm);
-    } else {
-        release_views();
+    if !is_shown() {
+        return;
     }
+    if interacting() {
+        // A click or open menu is in progress; replacing its control now
+        // would drop the action. Try again shortly.
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            super::request_refresh(&app);
+        });
+        return;
+    }
+    rebuild(app, mtm);
+}
+
+/// A mouse button is down, or AppKit is tracking a menu or control.
+fn interacting() -> bool {
+    if NSEvent::pressedMouseButtons() != 0 {
+        return true;
+    }
+    let mode = objc2_foundation::NSRunLoop::currentRunLoop().currentMode();
+    let tracking = unsafe { objc2_app_kit::NSEventTrackingRunLoopMode };
+    mode.is_some_and(|m| m.isEqualToString(tracking))
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +465,10 @@ fn column(
     s
 }
 
+fn percent(fraction: f64) -> String {
+    format!("{:.0}%", fraction * 100.0)
+}
+
 fn label(
     mtm: MainThreadMarker,
     text: &str,
@@ -504,7 +549,11 @@ struct Builder<'a> {
     target: &'a Target,
     slots: Vec<Slot>,
     generation: isize,
+    progress: ProgressViews,
 }
+
+/// Download bars and their percentage labels, by row id.
+type ProgressViews = HashMap<String, (Retained<NSProgressIndicator>, Retained<NSTextField>)>;
 
 impl Builder<'_> {
     fn tag(&mut self, slot: Slot) -> isize {
@@ -614,15 +663,12 @@ impl Builder<'_> {
                 bar.setDoubleValue(*fraction);
                 no_autoresize(&bar);
                 activate(&[bar.widthAnchor().constraintEqualToConstant(80.0)]);
+                let pct_label = label(mtm, &percent(*fraction), 11.0, false, true);
+                self.progress
+                    .insert(row.id.clone(), (bar.clone(), pct_label.clone()));
                 let bar: Retained<NSView> = upcast(&*bar);
                 set_identifier(&bar, &format!("{}.progress", row.id));
-                let pct: Retained<NSView> = upcast(&*label(
-                    mtm,
-                    &format!("{:.0}%", fraction * 100.0),
-                    11.0,
-                    false,
-                    true,
-                ));
+                let pct: Retained<NSView> = upcast(&*pct_label);
                 let cancel = self.button(cancel);
                 upcast(&*stack(mtm, false, 6.0, &[bar, pct, cancel]))
             }
@@ -821,7 +867,7 @@ pub fn prebuild_other_tabs(app: &AppHandle) {
 /// don't, and puts them on screen when `show` is set.
 fn prepare(app: &AppHandle, mtm: MainThreadMarker, tab: Tab, show: bool) {
     let started = Instant::now();
-    let snapshot = super::snapshot(app);
+    let snapshot = super::snapshot_for(app, Some(tab));
     let snapshot_took = started.elapsed();
     let screen = super::view::build(&snapshot, tab);
 
@@ -829,7 +875,24 @@ fn prepare(app: &AppHandle, mtm: MainThreadMarker, tab: Tab, show: bool) {
         let mut guard = cell.borrow_mut();
         let Some(ui) = guard.as_mut() else { return };
         let fresh = ui.trees.get(&tab).is_some_and(|t| t.screen == screen);
-        if !fresh {
+        let progress_only = !fresh
+            && ui
+                .trees
+                .get(&tab)
+                .is_some_and(|t| super::view::same_but_progress(&t.screen, &screen));
+        if progress_only {
+            // Downloads tick several times a second: move the bars, keep
+            // the views (and whatever the user is pointing at).
+            if let Some(tree) = ui.trees.get_mut(&tab) {
+                for (id, fraction) in super::view::progress_of(&screen) {
+                    if let Some((bar, pct)) = tree.progress.get(&id) {
+                        bar.setDoubleValue(fraction);
+                        pct.setStringValue(&ns(&percent(fraction)));
+                    }
+                }
+                tree.screen = screen;
+            }
+        } else if !fresh {
             // Keep the scroll position when redrawing the tab on screen.
             let offset = match (ui.shown == Some(tab), ui.trees.get(&tab)) {
                 (true, Some(old)) => old.scroll.contentView().bounds().origin.y,
@@ -883,6 +946,7 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
         target,
         slots: Vec::new(),
         generation,
+        progress: HashMap::new(),
     };
 
     let header = b.header(&screen);
@@ -899,7 +963,7 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
     set_identifier(&footer_label, "footer.version");
     let quit = b.button(&ButtonSpec {
         id: "footer.quit".into(),
-        title: "Quit Handy".into(),
+        title: "Quit Handy Bar".into(),
         action: Action::Quit,
         prominent: false,
     });
@@ -910,6 +974,7 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
         &[upcast(&*footer_label), spacer(mtm), quit],
     );
     let slots = std::mem::take(&mut b.slots);
+    let progress = std::mem::take(&mut b.progress);
 
     // Scrollable middle: a flipped document view holding the blocks.
     let doc: Retained<FlippedView> =
@@ -974,6 +1039,7 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
         screen,
         outer,
         tabs,
+        progress,
         scroll,
         slots,
         generation,

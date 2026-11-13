@@ -214,6 +214,16 @@ fn windows_taskbar_theme() -> Option<AppTheme> {
 /// macOS Secure Input). Busy states keep their normal icons. The menu line says
 /// what's wrong, so the badge doesn't vary by level.
 pub fn get_icon_path(theme: AppTheme, state: TrayIconState, badge: bool) -> &'static str {
+    // Handy Bar's own glyphs (templates: macOS tints them for the menu bar).
+    #[cfg(target_os = "macos")]
+    if crate::menubar::enabled() {
+        return match state {
+            TrayIconState::Idle if badge => "resources/handybar/tray_idle_warning.png",
+            TrayIconState::Idle => "resources/handybar/tray_idle.png",
+            TrayIconState::Recording => "resources/handybar/tray_recording.png",
+            TrayIconState::Transcribing => "resources/handybar/tray_transcribing.png",
+        };
+    }
     if badge && state == TrayIconState::Idle {
         return match theme {
             AppTheme::Dark => "resources/tray_idle_warning.png",
@@ -806,6 +816,11 @@ fn last_transcript_text(entry: &HistoryEntry) -> &str {
 }
 
 pub fn set_tray_visibility(app: &AppHandle, visible: bool) {
+    // The menu bar icon is the whole UI there; hiding it would leave none.
+    #[cfg(target_os = "macos")]
+    if !visible && crate::menubar::enabled() {
+        return;
+    }
     let tray = app.state::<TrayIcon>();
     if let Err(e) = tray.set_visible(visible) {
         error!("Failed to set tray visibility: {}", e);
@@ -828,6 +843,10 @@ pub fn recreate_tray_icon(app: &AppHandle) {
         .map(|args| args.no_tray)
         .unwrap_or(false);
     if no_tray || !settings::get_settings(app).show_tray_icon {
+        return;
+    }
+    // Recreating the icon would pull the anchor out from under an open popover.
+    if crate::menubar::enabled() && crate::menubar::is_open() {
         return;
     }
     let Some(tray) = app.try_state::<TrayIcon>() else {

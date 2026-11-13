@@ -57,6 +57,8 @@ struct Hud {
     text_above: Retained<NSTextField>,
     text_below: Retained<NSTextField>,
     column: Retained<NSStackView>,
+    /// Read once per recording, not per word.
+    position: OverlayPosition,
     open_width: Retained<objc2_app_kit::NSLayoutConstraint>,
     committed: String,
     tentative: String,
@@ -121,6 +123,9 @@ fn build(mtm: MainThreadMarker) -> Hud {
     panel.setHasShadow(true);
     panel.setIgnoresMouseEvents(true);
     panel.setHidesOnDeactivate(false);
+    // Starting dictation from the popover hides the app to hand focus back;
+    // the indicator must stay up regardless.
+    panel.setCanHide(false);
     panel.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary
@@ -248,6 +253,7 @@ fn build(mtm: MainThreadMarker) -> Hud {
         text_above,
         text_below,
         column,
+        position: OverlayPosition::Bottom,
         open_width,
         committed: String::new(),
         tentative: String::new(),
@@ -274,8 +280,8 @@ fn symbol(name: &str, tint: Retained<NSColor>, view: &NSImageView) {
 
 /// Sizes the panel to its content and places it on the screen with the
 /// pointer, at the top or bottom as set.
-fn place(hud: &Hud, app: &AppHandle) {
-    let position = settings::get_settings(app).overlay_position;
+fn place(hud: &Hud, _app: &AppHandle) {
+    let position = hud.position;
     let open = !hud.committed.is_empty() || !hud.tentative.is_empty();
     // The text sits on the side away from the screen edge, like upstream.
     let (shown, other) = match position {
@@ -341,12 +347,22 @@ fn place(hud: &Hud, app: &AppHandle) {
     );
 }
 
+/// Whether live words should show; set when a recording's indicator appears.
+static LIVE_TEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn present(app: &AppHandle, mode: Mode, text: String) {
     GENERATION.fetch_add(1, Ordering::SeqCst);
+    let settings = settings::get_settings(app);
+    LIVE_TEXT.store(
+        settings.overlay_style == OverlayStyle::Live,
+        Ordering::SeqCst,
+    );
+    let position = settings.overlay_position;
     let app2 = app.clone();
     on_main(app, move |mtm| {
         with_hud(mtm, |hud| {
             hud.mode = mode;
+            hud.position = position;
             match mode {
                 Mode::Listening => {
                     symbol("mic.fill", NSColor::systemRedColor(), &hud.icon);
@@ -469,7 +485,7 @@ pub fn show(app: &AppHandle, state: &str) {
 
 /// Live text for the Live style while listening.
 pub fn live_text(app: &AppHandle, committed: &str, tentative: &str) {
-    if settings::get_settings(app).overlay_style != OverlayStyle::Live {
+    if !LIVE_TEXT.load(Ordering::SeqCst) {
         return;
     }
     let (committed, tentative) = (committed.to_string(), tentative.to_string());

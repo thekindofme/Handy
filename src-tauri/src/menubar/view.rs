@@ -317,6 +317,40 @@ pub struct Snapshot {
 // ---------------------------------------------------------------------------
 
 /// `option+space` → `⌥ Space`, `ctrl+shift+d` → `⌃ ⇧ D`.
+/// The download fractions on a screen, by row id.
+pub fn progress_of(screen: &Screen) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for block in &screen.blocks {
+        if let Block::Group { rows, .. } = block {
+            for row in rows {
+                if let Control::Progress { fraction, .. } = &row.control {
+                    out.push((row.id.clone(), *fraction));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// True when two screens differ only in download fractions, so the views
+/// can be updated in place instead of rebuilt.
+pub fn same_but_progress(a: &Screen, b: &Screen) -> bool {
+    fn zeroed(s: &Screen) -> Screen {
+        let mut s = s.clone();
+        for block in &mut s.blocks {
+            if let Block::Group { rows, .. } = block {
+                for row in rows {
+                    if let Control::Progress { fraction, .. } = &mut row.control {
+                        *fraction = 0.0;
+                    }
+                }
+            }
+        }
+        s
+    }
+    zeroed(a) == zeroed(b)
+}
+
 pub fn pretty_shortcut(binding: &str) -> String {
     if binding.trim().is_empty() {
         return "Not set".to_string();
@@ -1164,7 +1198,7 @@ pub fn build(s: &Snapshot, tab: Tab) -> Screen {
         tab,
         header: header(s),
         blocks,
-        footer: format!("Handy {}", s.version),
+        footer: format!("Handy Bar {} · unofficial fork of Handy", s.version),
     }
 }
 
@@ -1351,7 +1385,7 @@ mod tests {
         assert!(screen.header.subtitle.contains("⌥ Space"));
         assert_eq!(screen.header.buttons.len(), 1);
         assert_eq!(screen.header.buttons[0].action, Action::ToggleDictation);
-        assert_eq!(screen.footer, "Handy 0.10.0");
+        assert_eq!(screen.footer, "Handy Bar 0.10.0 · unofficial fork of Handy");
     }
 
     #[test]
@@ -1606,6 +1640,20 @@ mod tests {
             );
         }
         assert!(has_row(&screen, "settings.auto_submit_key"));
+    }
+
+    #[test]
+    fn progress_changes_alone_are_detected() {
+        let mut a = ready();
+        a.progress.insert("a".into(), 0.2);
+        a.progress.insert("b".into(), 0.2);
+        let mut b = a.clone();
+        b.progress.insert("b".into(), 0.7);
+        let (sa, sb) = (build(&a, Tab::Models), build(&b, Tab::Models));
+        assert!(!progress_of(&sa).is_empty());
+        assert_ne!(sa, sb);
+        assert!(same_but_progress(&sa, &sb));
+        assert!(!same_but_progress(&sa, &build(&a, Tab::Settings)));
     }
 
     #[test]

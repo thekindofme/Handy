@@ -784,6 +784,7 @@ pub fn hide_recording_overlay(app_handle: &AppHandle) {
     #[cfg(target_os = "macos")]
     if crate::menubar::enabled() {
         crate::menubar::hud::hide(app_handle);
+        return;
     }
     // Always hide the overlay regardless of settings - if setting was changed while recording,
     // we still want to hide it properly

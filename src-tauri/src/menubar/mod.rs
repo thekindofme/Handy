@@ -124,10 +124,34 @@ pub fn install(app: &AppHandle) {
     }
 }
 
+/// Left click opens the popover; right click keeps the menu.
+pub fn configure_tray(
+    builder: tauri::tray::TrayIconBuilder<tauri::Wry>,
+) -> tauri::tray::TrayIconBuilder<tauri::Wry> {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+    builder
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                on_tray_click(tray.app_handle());
+            }
+        })
+}
+
 /// Left click on the menu bar icon.
 pub fn on_tray_click(app: &AppHandle) {
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || appkit::toggle(&app2));
+}
+
+/// Whether the popover is on screen.
+pub fn is_open() -> bool {
+    appkit::is_open()
 }
 
 /// Shows the popover (used wherever upstream shows the settings window).
@@ -139,6 +163,10 @@ pub fn open(app: &AppHandle) {
 /// Redraws the popover if it's open. Cheap to call often: calls made while a
 /// redraw is pending are merged into it.
 pub fn request_refresh(app: &AppHandle) {
+    // Nothing on screen to redraw; the next open reads fresh state.
+    if !appkit::is_open() {
+        return;
+    }
     let Some(s) = state(app) else { return };
     if s.refresh_pending.swap(true, Ordering::SeqCst) {
         return;
@@ -149,12 +177,17 @@ pub fn request_refresh(app: &AppHandle) {
     let app2 = app.clone();
     std::thread::spawn(move || {
         let app3 = app2.clone();
-        let _ = app2.run_on_main_thread(move || {
+        let posted = app2.run_on_main_thread(move || {
             if let Some(s) = state(&app3) {
                 s.refresh_pending.store(false, Ordering::SeqCst);
             }
             appkit::refresh(&app3);
         });
+        if posted.is_err() {
+            if let Some(s) = state(&app2) {
+                s.refresh_pending.store(false, Ordering::SeqCst);
+            }
+        }
     });
 }
 
@@ -204,6 +237,13 @@ fn refresh_devices(app: &AppHandle) {
 
 /// Everything the popover shows, read fresh.
 pub(crate) fn snapshot(app: &AppHandle) -> Snapshot {
+    snapshot_for(app, None)
+}
+
+/// A snapshot for drawing `tab` (`None`: every tab). History is a database
+/// read, so it's skipped for tabs that don't show it.
+pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
+    let wants_history = matches!(tab, None | Some(Tab::Home) | Some(Tab::History));
     let settings = settings::get_settings(app);
     let model_manager = app.state::<Arc<ModelManager>>();
     let models = model_manager.get_available_models();
@@ -221,8 +261,9 @@ pub(crate) fn snapshot(app: &AppHandle) -> Snapshot {
             auto_enabled: menu.auto_enabled,
             options: menu.main.into_iter().chain(menu.others).collect(),
         });
-    let history = app
-        .try_state::<Arc<HistoryManager>>()
+    let history = wants_history
+        .then(|| app.try_state::<Arc<HistoryManager>>())
+        .flatten()
         .and_then(|hm| {
             tauri::async_runtime::block_on(hm.get_history_entries(None, Some(HISTORY_SHOWN))).ok()
         })
@@ -308,8 +349,14 @@ fn mark_onboarded(app: &AppHandle) {
 /// After a permission prompt, checks for a while until it's granted, then
 /// finishes setup.
 fn watch_permissions(app: &AppHandle) {
+    // One watcher at a time, however many times Allow is clicked.
+    static WATCHING: AtomicBool = AtomicBool::new(false);
+    if WATCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let app = app.clone();
     std::thread::spawn(move || {
+        let _done = scopeguard_reset(&WATCHING);
         for _ in 0..120 {
             std::thread::sleep(Duration::from_millis(500));
             let (mic, ax) = permissions();
@@ -325,10 +372,21 @@ fn watch_permissions(app: &AppHandle) {
     });
 }
 
+/// Clears `flag` when dropped.
+fn scopeguard_reset(flag: &'static AtomicBool) -> impl Drop {
+    struct Reset(&'static AtomicBool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    Reset(flag)
+}
+
 fn after_setup_step(app: &AppHandle) {
     if view::setup_rows(&snapshot(app)).is_empty() {
         mark_onboarded(app);
-        flash(app, "Handy is ready. Press your shortcut to dictate.");
+        flash(app, "Handy Bar is ready. Press your shortcut to dictate.");
     }
 }
 
@@ -570,7 +628,11 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
             Ok(())
         }
         Action::CopyEntry(id) => {
-            let entry = snapshot(app).history.into_iter().find(|e| e.id == id);
+            let entry = app.try_state::<Arc<HistoryManager>>().and_then(|hm| {
+                tauri::async_runtime::block_on(hm.get_entry_by_id(id))
+                    .ok()
+                    .flatten()
+            });
             match entry {
                 Some(e) => {
                     let text = e

@@ -289,31 +289,15 @@ fn initialize_core_logic(app_handle: &AppHandle) {
                 }
             });
     }
-    #[cfg(target_os = "macos")]
-    if menubar::enabled() {
-        // Left click opens the menu bar popover; right click keeps the menu.
-        tray_builder = tray_builder
-            .show_menu_on_left_click(false)
-            .on_tray_icon_event(|tray, event| {
-                use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
-                if !matches!(event, TrayIconEvent::Move { .. }) {
-                    log::info!("Tray event: {event:?}");
-                }
-                if let TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } = event
-                {
-                    menubar::on_tray_click(tray.app_handle());
-                }
-            });
-    } else {
-        tray_builder = tray_builder.show_menu_on_left_click(true);
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(target_os = "windows"))]
     {
         tray_builder = tray_builder.show_menu_on_left_click(true);
+    }
+    // Menu bar UI: left click opens the popover instead (the builder's
+    // setters are last-wins, so upstream's lines above stay untouched).
+    #[cfg(target_os = "macos")]
+    if menubar::enabled() {
+        tray_builder = menubar::configure_tray(tray_builder);
     }
 
     let tray = tray_builder
