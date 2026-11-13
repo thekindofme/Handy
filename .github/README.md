@@ -56,6 +56,15 @@ Accessibility permissions to the app's signature, so set
 `HANDY_SIGNING_IDENTITY` to a local code-signing identity if you rebuild
 often; otherwise you'll be asked again after every build.
 
+`build-test-app.sh` makes a quick **debug** build for development. Debug
+builds log transcripts in plain text (Handy only hides them in release
+builds), so for everyday use build a release instead:
+
+```bash
+CMAKE_POLICY_VERSION_MINIMUM=3.5 bun run tauri build --bundles app
+open "src-tauri/target/release/bundle/macos/Handy Bar.app"
+```
+
 To run Handy's original WebView interface from the same build, start it with
 `HANDY_WEBVIEW_UI=1`.
 

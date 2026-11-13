@@ -1463,7 +1463,37 @@ fn shortcut_keys(binding: &str) -> std::collections::BTreeSet<String> {
 /// contain the other's), so both would start.
 pub fn shortcuts_overlap(a: &str, b: &str) -> bool {
     let (a, b) = (shortcut_keys(a), shortcut_keys(b));
-    !a.is_empty() && !b.is_empty() && (a.is_subset(&b) || b.is_subset(&a))
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    // A shortcut with a regular key matches exactly (⌥ Space doesn't fire
+    // on ⌥ ⇧ Space), but a modifier-only one fires inside any bigger combo.
+    let (small, big) = if a.len() < b.len() {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    small.is_subset(big) && small.iter().all(|k| is_modifier(k))
+}
+
+fn is_modifier(key: &str) -> bool {
+    matches!(
+        key,
+        "command"
+            | "cmd"
+            | "super"
+            | "meta"
+            | "option"
+            | "alt"
+            | "ctrl"
+            | "control"
+            | "shift"
+            | "fn"
+            | "function"
+    )
 }
 
 /// Another dictation binding whose shortcut overlaps `binding_id`'s.
@@ -2361,7 +2391,8 @@ mod tests {
             "shift_left+command_right"
         ));
         assert!(shortcuts_overlap("option+space", "option+space"));
-        assert!(shortcuts_overlap("option+space", "option+shift+space"));
+        assert!(!shortcuts_overlap("option+space", "option+shift+space"));
+        assert!(shortcuts_overlap("ctrl", "ctrl+k"));
         assert!(!shortcuts_overlap("command_right", "option_right"));
         let mut s = ready();
         s.settings.post_process_enabled = true;
@@ -2388,7 +2419,10 @@ mod tests {
         let screen = build(&s, Tab::Cleanup);
         let r = row(&screen, "cleanup.command");
         assert_eq!(r.control, Control::None);
-        assert_eq!(r.detail.as_deref(), Some("claude -p --model haiku"));
+        assert_eq!(
+            r.detail.as_deref(),
+            Some(crate::cleanup_command::PRESETS[0].2)
+        );
         s.command.command = "my-tool --fast".into();
         let screen = build(&s, Tab::Cleanup);
         assert!(matches!(

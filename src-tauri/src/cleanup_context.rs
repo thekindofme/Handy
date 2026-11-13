@@ -185,11 +185,7 @@ mod imp {
         if screen_text && screen_recording_allowed() {
             ctx.screen_text = front_window_id(pid)
                 .and_then(capture)
-                .and_then(|path| {
-                    let text = recognize(&path, custom_words);
-                    let _ = std::fs::remove_file(&path);
-                    text
-                })
+                .and_then(|capture| recognize(&capture.path, custom_words))
                 .map(|t| tidy(&t))
                 .filter(|t| !t.is_empty());
         }
@@ -256,17 +252,40 @@ mod imp {
     }
 
     /// Captures one window to a temporary PNG.
-    fn capture(window_id: u32) -> Option<std::path::PathBuf> {
-        let path = std::env::temp_dir().join(format!(
-            "handybar-context-{}-{window_id}.png",
-            std::process::id()
-        ));
+    /// A private (0700) folder for one capture, removed when dropped, so
+    /// the image never outlives the read even if OCR fails.
+    pub struct Capture {
+        dir: std::path::PathBuf,
+        pub path: std::path::PathBuf,
+    }
+
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Captures one window to a PNG in a fresh private folder.
+    fn capture(window_id: u32) -> Option<Capture> {
+        use std::os::unix::fs::DirBuilderExt;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("handybar-context-{}-{nonce:x}", std::process::id()));
+        // `create` fails if anything already sits at this path.
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).ok()?;
+        let capture = Capture {
+            path: dir.join("window.png"),
+            dir,
+        };
         let status = std::process::Command::new("/usr/sbin/screencapture")
             .args(["-x", "-o", "-t", "png", &format!("-l{window_id}")])
-            .arg(&path)
+            .arg(&capture.path)
             .status()
             .ok()?;
-        (status.success() && path.exists()).then_some(path)
+        (status.success() && capture.path.exists()).then_some(capture)
     }
 
     /// Apple Vision text recognition, top to bottom.

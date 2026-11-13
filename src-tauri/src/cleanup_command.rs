@@ -49,14 +49,27 @@ pub const PRESETS: [(&str, &str, &str, u64); 2] = [
     (
         "claude_haiku",
         "Claude Code (fastest)",
-        "claude -p --model haiku",
+        // No tools, no MCP servers, no hooks or settings, nothing saved:
+        // the transcript and screen text are data, never instructions it
+        // can act on.
+        "claude -p --model haiku --tools \"\" --strict-mcp-config --no-session-persistence --setting-sources \"\"",
         15,
     ),
     (
         "codex",
         "Codex (slower)",
-        "codex exec --skip-git-repo-check --ephemeral -c model_reasoning_effort=low -",
+        // Read-only sandbox, nothing saved.
+        "codex exec --skip-git-repo-check --ephemeral -s read-only -c model_reasoning_effort=low -",
         30,
+    ),
+];
+
+/// Earlier preset commands, upgraded to the hardened ones on load.
+const LEGACY_PRESETS: [(&str, usize); 2] = [
+    ("claude -p --model haiku", 0),
+    (
+        "codex exec --skip-git-repo-check --ephemeral -c model_reasoning_effort=low -",
+        1,
     ),
 ];
 
@@ -72,7 +85,7 @@ impl Default for CommandSettings {
     fn default() -> Self {
         CommandSettings {
             enabled: false,
-            command: "claude -p --model haiku".to_string(),
+            command: PRESETS[0].2.to_string(),
             timeout_secs: 15,
             prewarm: true,
             app_hints: true,
@@ -87,7 +100,13 @@ pub fn load(app: &AppHandle) -> CommandSettings {
     ))
     .ok()
     .and_then(|store| store.get(STORE_KEY))
-    .and_then(|v| serde_json::from_value(v).ok())
+    .and_then(|v| serde_json::from_value::<CommandSettings>(v).ok())
+    .map(|mut s| {
+        if let Some((_, i)) = LEGACY_PRESETS.iter().find(|(c, _)| *c == s.command.trim()) {
+            s.command = PRESETS[*i].2.to_string();
+        }
+        s
+    })
     .unwrap_or_default()
 }
 
@@ -167,10 +186,23 @@ fn spawn(command: &str) -> std::io::Result<Child> {
     if let Some(path) = login_path() {
         cmd.env("PATH", path);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        cmd.current_dir(home);
+    // An empty private folder: an agentic CLI started here has no project
+    // files, CLAUDE.md or repo to read.
+    if let Some(dir) = work_dir() {
+        cmd.current_dir(dir);
     }
     cmd.spawn()
+}
+
+/// `$TMPDIR/handybar-cleanup`, created empty and private (0700).
+fn work_dir() -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let dir = std::env::temp_dir().join("handybar-cleanup");
+    if !dir.is_dir() {
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).ok()?;
+    }
+    let mode = std::fs::metadata(&dir).ok()?.permissions().mode();
+    (mode & 0o077 == 0).then_some(dir)
 }
 
 fn kill(mut warm: Warm) {
@@ -338,6 +370,11 @@ fn run_blocking(settings: &CommandSettings, input: &str, transcript: &str) -> Co
     let cleaned = clean_output(&out);
     if cleaned.is_empty() {
         return CommandOutcome::Failed("the command printed nothing".into());
+    }
+    // A cleanup is about as long as what was said; a much longer reply has
+    // added something (an answer, or text from the screen).
+    if cleaned.chars().count() > transcript.chars().count() * 2 + 200 {
+        return CommandOutcome::Failed("its reply was much longer than what you said".into());
     }
     if !is_faithful(transcript, &cleaned) {
         return CommandOutcome::Failed(format!(
@@ -511,6 +548,22 @@ mod tests {
             }
             CommandOutcome::Done(t) => panic!("{t}"),
         }
+    }
+
+    #[test]
+    fn a_reply_much_longer_than_the_dictation_is_refused() {
+        let s = CommandSettings {
+            enabled: true,
+            command: "cat; printf ' %.0s' $(seq 1 400); echo AWS_SECRET=leaked".into(),
+            timeout_secs: 5,
+            prewarm: false,
+            ..Default::default()
+        };
+        let said = "please send the report to finance today";
+        assert!(matches!(
+            run_blocking(&s, said, said),
+            CommandOutcome::Failed(_)
+        ));
     }
 
     #[test]

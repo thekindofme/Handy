@@ -447,7 +447,10 @@ pub(crate) async fn process_transcription_output(
                 PostProcessOutcome::Done(text)
             }
             Some(crate::cleanup_command::CommandOutcome::Failed(why)) => {
-                warn!("Cleanup command failed: {why}");
+                // The reason can quote the tool's output; it's shown in the
+                // Cleanup tab, not logged.
+                let _ = why;
+                warn!("Cleanup command failed; pasted the original text");
                 PostProcessOutcome::Failed
             }
             None => {

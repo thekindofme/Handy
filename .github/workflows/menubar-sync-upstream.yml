@@ -21,7 +21,7 @@ jobs:
       BRANCH: menubar-native
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.BRANCH }}
           fetch-depth: 0
@@ -52,10 +52,16 @@ jobs:
 
       - name: Open pull request
         if: steps.merge.outputs.behind != '0'
+        # Step outputs carry upstream file names: pass them as environment
+        # variables, never interpolated into the script.
+        env:
+          SYNC: ${{ steps.merge.outputs.sync }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          BEHIND: ${{ steps.merge.outputs.behind }}
         run: |
-          sync="${{ steps.merge.outputs.sync }}"
-          conflicts="${{ steps.merge.outputs.conflicts }}"
-          body="Merges ${{ steps.merge.outputs.behind }} new commit(s) from cjpais/handy.
+          sync="$SYNC"
+          conflicts="$CONFLICTS"
+          body="Merges $BEHIND new commit(s) from cjpais/handy.
 
           Run \`scripts/menubar/sync-upstream.sh\` locally to test, or check the macOS build on this PR."
           if [ -n "$conflicts" ]; then

@@ -26,11 +26,46 @@
 <meta name="twitter:description" content="Press a shortcut, speak, and your words are typed where your cursor is. Native, private, open source. An unofficial fork of Handy.">
 <meta name="twitter:image" content="https://handybar.yasithfernando.com/assets/og.png">
 
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Instrument+Sans:wght@400;600&display=swap" rel="stylesheet">
 
 <style>
+/* Fonts are served from this site (SIL OFL), so a visit makes no third-party requests. */
+@font-face {
+  font-family: 'Bricolage Grotesque';
+  font-style: normal;
+  font-weight: 600;
+  font-stretch: 100%;
+  font-display: swap;
+  src: url(assets/fonts/bricolage-grotesque.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Bricolage Grotesque';
+  font-style: normal;
+  font-weight: 800;
+  font-stretch: 100%;
+  font-display: swap;
+  src: url(assets/fonts/bricolage-grotesque.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Instrument Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-stretch: 100%;
+  font-display: swap;
+  src: url(assets/fonts/instrument-sans.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Instrument Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-stretch: 100%;
+  font-display: swap;
+  src: url(assets/fonts/instrument-sans.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   --paper: #f6f2f9;
   --paper-2: #ece4f2;
@@ -325,7 +360,7 @@ pre { margin: 0; padding: 1.2rem; overflow-x: auto; font: 0.86rem/1.75 var(--mon
 
     <div class="hud-stage">
       <div class="hud" role="img" aria-label="The recording indicator: a dark card showing the words spoken so far above a red microphone, moving level bars and the word Listening.">
-        <p class="hud-text" aria-hidden="true"><span><span id="said">Reply to Dilani: the build is green, I'll merge after</span> <span class="tentative" id="tentative">lunch.</span></span></p>
+        <p class="hud-text" aria-hidden="true"><span><span id="said">Reply to Sam: the build is green, I'll merge after</span> <span class="tentative" id="tentative">lunch.</span></span></p>
         <div class="hud-row" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 0 0-8 0v5a4 4 0 0 0 4 4zm7-4a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.9V20H8.5a1 1 0 1 0 0 2h7a1 1 0 1 0 0-2H13v-2.1A7 7 0 0 0 19 11z"/></svg>
           <span class="bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
@@ -432,8 +467,8 @@ pre { margin: 0; padding: 1.2rem; overflow-x: auto; font: 0.86rem/1.75 var(--mon
         </ol>
         <div class="example">
           <dl>
-            <div><dt>You say</dt><dd class="said">um so can you send the the invoice to Priya by Friday, no wait, Thursday</dd></div>
-            <div><dt>A cleanup prompt can paste</dt><dd>Can you send the invoice to Priya by Thursday?</dd></div>
+            <div><dt>You say</dt><dd class="said">um so can you send the the invoice to Alex by Friday, no wait, Thursday</dd></div>
+            <div><dt>A cleanup prompt can paste</dt><dd>Can you send the invoice to Alex by Thursday?</dd></div>
           </dl>
         </div>
       </div>
@@ -474,8 +509,9 @@ pre { margin: 0; padding: 1.2rem; overflow-x: auto; font: 0.86rem/1.75 var(--mon
           <tr><th scope="row">Your voice</th><td><b>Nowhere.</b> It's recorded and transcribed on your Mac.</td></tr>
           <tr><th scope="row">Speech models</th><td>Downloaded once from inside the app, then run locally.</td></tr>
           <tr><th scope="row">History and recordings</th><td><b>Kept on your Mac.</b> Copy or delete entries in the History tab.</td></tr>
-          <tr><th scope="row">Transcribed text</th><td>Typed at your cursor. With cleanup on, it also goes to the AI provider or command-line tool you picked.</td></tr>
-          <tr><th scope="row">App name, window title, text on screen</th><td>Only when you use the cleanup shortcut, and only inside the cleanup prompt. Screen text is off by default.</td></tr>
+          <tr><th scope="row">Transcribed text</th><td>Typed at your cursor. When you use the cleanup shortcut, it also goes to the AI provider or command-line tool you picked.</td></tr>
+          <tr><th scope="row">App name, window title, text on screen</th><td>Only when you use the cleanup shortcut, inside the cleanup prompt, to the provider or tool you picked. App name and window title are on by default (a window title can include a document name or email subject); screen text is off by default.</td></tr>
+          <tr><th scope="row">App log</th><td><b>On your Mac.</b> Handy Bar leaves typed keys and cleanup output out of its own log lines. Builds made with the debug build script also log transcripts (Handy only hides them in release builds).</td></tr>
           <tr><th scope="row">Update checks</th><td><b>Turned off.</b> Handy's updater would replace Handy Bar with upstream Handy.</td></tr>
         </tbody>
       </table>
@@ -585,7 +621,7 @@ open "src-tauri/target/debug/bundle/macos/Handy Bar.app"</code></pre>
   // Live words in the hero indicator
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   var lines = [
-    "Reply to Dilani: the build is green, I'll merge after lunch.",
+    "Reply to Sam: the build is green, I'll merge after lunch.",
     "Rename the function to parse config and add a test for empty input.",
     "Note to self, the popover is AppKit and there is no web view."
   ];

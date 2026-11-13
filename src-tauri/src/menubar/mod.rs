@@ -341,6 +341,25 @@ pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
         })
         .unwrap_or_else(|| ("all".into(), "recommended".into(), None));
 
+    // Debug screenshots: stand-in device names, not this Mac's.
+    #[cfg(debug_assertions)]
+    let (settings, microphones, outputs) = if std::env::var_os("HANDYBAR_DEMO").is_some() {
+        let mut settings = settings;
+        settings.selected_microphone = Some("MacBook Pro Microphone".into());
+        settings.selected_output_device = Some("MacBook Pro Speakers".into());
+        // The default shortcuts, not whatever this Mac uses.
+        for binding in settings.bindings.values_mut() {
+            binding.current_binding = binding.default_binding.clone();
+        }
+        (
+            settings,
+            vec!["MacBook Pro Microphone".to_string()],
+            vec!["MacBook Pro Speakers".to_string()],
+        )
+    } else {
+        (settings, microphones, outputs)
+    };
+
     Snapshot {
         phase: phase(app),
         settings,
@@ -849,10 +868,20 @@ fn on_key_event(app: &AppHandle, event: KeyEvent) {
     }
 }
 
+/// An action for the log: typed text (API keys, prompts, commands) and
+/// links are left out.
+fn redacted(action: &Action) -> String {
+    match action {
+        Action::SetText(key, _) => format!("SetText({key:?}, <redacted>)"),
+        Action::OpenUrl(_) => "OpenUrl(<link>)".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Runs a popover action. Called on the main thread; anything slow goes to
 /// a worker so the popover never stalls.
 pub(crate) fn perform(app: &AppHandle, action: Action) {
-    info!("Menu bar action: {action:?}");
+    info!("Menu bar action: {}", redacted(&action));
     let result: Result<(), String> = match action {
         Action::ToggleDictation => {
             // Give focus back to the app being dictated into first.
