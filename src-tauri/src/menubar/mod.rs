@@ -281,6 +281,12 @@ pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
         })
         .map(|page| page.entries)
         .unwrap_or_default();
+    #[cfg(debug_assertions)]
+    let history = if wants_history && std::env::var_os("HANDYBAR_DEMO").is_some() {
+        demo_history()
+    } else {
+        history
+    };
     let (mic_permission, accessibility_permission) = permissions();
     // Accessibility may have been granted in System Settings since launch;
     // start the keyboard and shortcuts as soon as it is (idempotent).
@@ -363,6 +369,52 @@ pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
             .try_state::<Arc<crate::managers::transcription::TranscriptionManager>>()
             .is_some_and(|tm| tm.is_model_loaded()),
     }
+}
+
+/// Debug builds with `HANDYBAR_DEMO` set show these instead of the user's
+/// history, for screenshots that don't publish anyone's dictation.
+#[cfg(debug_assertions)]
+fn demo_history() -> Vec<crate::managers::history::HistoryEntry> {
+    let now = chrono::Utc::now().timestamp();
+    [
+        (
+            60,
+            "Can we move the design review to Thursday afternoon? Wednesday is packed for me.",
+        ),
+        (
+            240,
+            "Add a retry with exponential backoff to the upload worker, and log the attempt count.",
+        ),
+        (
+            900,
+            "Thanks for the quick turnaround on this, the new onboarding flow looks great.",
+        ),
+        (
+            2400,
+            "Pick up oat milk, coffee beans and a birthday card on the way home.",
+        ),
+        (
+            5400,
+            "Remind me to book the car service for next Monday morning.",
+        ),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, (ago, text))| crate::managers::history::HistoryEntry {
+        id: 9000 + i as i64,
+        file_name: String::new(),
+        timestamp: now - ago,
+        saved: false,
+        title: String::new(),
+        transcription_text: text.to_string(),
+        post_processed_text: None,
+        post_process_prompt: None,
+        post_process_requested: false,
+        source_name: None,
+        language: None,
+        language_source: None,
+    })
+    .collect()
 }
 
 /// The tab to show: the last one picked, else Home.
