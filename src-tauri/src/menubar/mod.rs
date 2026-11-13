@@ -17,6 +17,7 @@
 
 mod appkit;
 pub mod capture;
+pub mod hud;
 pub mod view;
 
 use crate::managers::history::{HistoryManager, HistoryUpdatePayload};
@@ -228,6 +229,11 @@ pub(crate) fn snapshot(app: &AppHandle) -> Snapshot {
         .map(|page| page.entries)
         .unwrap_or_default();
     let (mic_permission, accessibility_permission) = permissions();
+    // Accessibility may have been granted in System Settings since launch;
+    // start the keyboard and shortcuts as soon as it is (idempotent).
+    if accessibility_permission {
+        start_input(app);
+    }
     let notice = crate::notices::tray_headline(app).map(|n| {
         let strings = crate::tray_i18n::get_tray_translations(Some(settings.app_language.clone()));
         n.code.tray_title(&strings).to_string()
@@ -399,6 +405,8 @@ fn set_choice(app: &AppHandle, key: ChoiceKey, value: String) -> Result<(), Stri
         ChoiceKey::ClipboardHandling => sc::change_clipboard_handling_setting(a, value),
         ChoiceKey::SoundTheme => sc::change_sound_theme_setting(a, value),
         ChoiceKey::AutoSubmitKey => sc::change_auto_submit_key_setting(a, value),
+        ChoiceKey::OverlayStyle => sc::change_overlay_style_setting(a, value),
+        ChoiceKey::OverlayPosition => sc::change_overlay_position_setting(a, value),
         ChoiceKey::UnloadTimeout => {
             crate::commands::transcription::set_model_unload_timeout(a, parse(&value)?);
             Ok(())
@@ -733,4 +741,9 @@ fn listen(app: &AppHandle) {
 
     let a = app.clone();
     HistoryUpdatePayload::listen_any(app, move |_| request_refresh(&a));
+
+    let a = app.clone();
+    crate::managers::transcription::StreamTextEvent::listen_any(app, move |e| {
+        hud::live_text(&a, &e.payload.committed, &e.payload.tentative)
+    });
 }

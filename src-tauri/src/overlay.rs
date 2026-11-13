@@ -518,6 +518,13 @@ fn show_overlay_state(app_handle: &AppHandle, state: &str) {
     OVERLAY_SESSION_SHOWING.store(true, Ordering::SeqCst);
     OVERLAY_SESSION_LIVE.store(is_live_state(state), Ordering::SeqCst);
 
+    // The native menu bar UI draws its own indicator instead of the WebView.
+    #[cfg(target_os = "macos")]
+    if crate::menubar::enabled() {
+        crate::menubar::hud::show(app_handle, state);
+        return;
+    }
+
     // The rest queries monitors and the cursor and mutates window geometry. On
     // Linux the monitor/cursor lookups hit GDK/Xlib on the process's shared X11
     // connection, which is only safe from the GTK main thread — running them on
@@ -664,6 +671,15 @@ pub fn show_overlay_notice(app_handle: &AppHandle, notice: &Notice) {
     }
     OVERLAY_SESSION_SHOWING.store(false, Ordering::SeqCst);
 
+    #[cfg(target_os = "macos")]
+    if crate::menubar::enabled() {
+        let strings = crate::tray_i18n::get_tray_translations(Some(
+            settings::get_settings(app_handle).app_language,
+        ));
+        crate::menubar::hud::notice(app_handle, notice.code.tray_title(&strings).to_string());
+        return;
+    }
+
     let state = notice_state(OVERLAY_SESSION_LIVE.load(Ordering::SeqCst));
     let handle = app_handle.clone();
     let notice = notice.clone();
@@ -765,6 +781,10 @@ static OVERLAY_SESSION_LIVE: AtomicBool = AtomicBool::new(false);
 pub fn hide_recording_overlay(app_handle: &AppHandle) {
     OVERLAY_SESSION_SHOWING.store(false, Ordering::SeqCst);
     OVERLAY_SESSION_LIVE.store(false, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    if crate::menubar::enabled() {
+        crate::menubar::hud::hide(app_handle);
+    }
     // Always hide the overlay regardless of settings - if setting was changed while recording,
     // we still want to hide it properly
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
@@ -831,6 +851,12 @@ pub fn emit_levels(app_handle: &AppHandle, levels: &[f32]) {
         return;
     }
     LAST_MIC_LEVEL_EMIT.store(now, Ordering::Relaxed);
+
+    #[cfg(target_os = "macos")]
+    if crate::menubar::enabled() {
+        crate::menubar::hud::levels(app_handle, levels);
+        return;
+    }
 
     // Target only the overlay window. In Tauri 2 both `AppHandle::emit`
     // and `WebviewWindow::emit` broadcast to all webviews; Tauri's

@@ -8,7 +8,7 @@
 use crate::managers::history::HistoryEntry;
 use crate::managers::model::ModelInfo;
 use crate::settings::{
-    AppSettings, AutoSubmitKey, ClipboardHandling, ModelUnloadTimeout, PasteMethod,
+    AppSettings, AutoSubmitKey, ClipboardHandling, ModelUnloadTimeout, OverlayStyle, PasteMethod,
     RecordingRetentionPeriod, ShortcutActivation, SoundTheme,
 };
 use std::collections::HashMap;
@@ -116,6 +116,8 @@ pub enum ChoiceKey {
     HistoryLimit,
     RecordingRetention,
     AutoSubmitKey,
+    OverlayStyle,
+    OverlayPosition,
 }
 
 #[cfg(test)]
@@ -133,6 +135,8 @@ impl ChoiceKey {
             ChoiceKey::HistoryLimit => "history_limit",
             ChoiceKey::RecordingRetention => "recording_retention",
             ChoiceKey::AutoSubmitKey => "auto_submit_key",
+            ChoiceKey::OverlayStyle => "overlay_style",
+            ChoiceKey::OverlayPosition => "overlay_position",
         }
     }
 }
@@ -333,7 +337,7 @@ pub fn pretty_shortcut(binding: &str) -> String {
                 .to_string();
             (part, side_free)
         })
-        .map(|(part, lower)| match lower.as_str() {
+        .map(|(_part, lower)| match lower.as_str() {
             "option" | "alt" | "option_left" | "option_right" => "⌥".to_string(),
             "command" | "cmd" | "super" | "meta" | "command_left" | "command_right" => {
                 "⌘".to_string()
@@ -892,7 +896,34 @@ fn models(s: &Snapshot) -> Vec<Block> {
 
 fn settings(s: &Snapshot) -> Vec<Block> {
     let st = &s.settings;
-    let mut dictation = vec![shortcut_row(s, "settings"), activation_row(s, "settings")];
+    let mut dictation = vec![
+        shortcut_row(s, "settings"),
+        activation_row(s, "settings"),
+        Row::new(
+            "settings.overlay_style",
+            "Recording indicator",
+            popup(
+                ChoiceKey::OverlayStyle,
+                vec![
+                    choice("live", "Levels + live text"),
+                    choice("minimal", "Levels only"),
+                    choice("none", "Off"),
+                ],
+                &serde_name(&st.overlay_style),
+            ),
+        ),
+    ];
+    if st.overlay_style != OverlayStyle::None {
+        dictation.push(Row::new(
+            "settings.overlay_position",
+            "Indicator position",
+            popup(
+                ChoiceKey::OverlayPosition,
+                vec![choice("bottom", "Bottom"), choice("top", "Top")],
+                &serde_name(&st.overlay_position),
+            ),
+        ));
+    }
     if let Some(row) = language_row(s, "settings") {
         dictation.push(row);
     }
@@ -1612,6 +1643,24 @@ mod tests {
         let acts = actions(&screen);
         assert!(acts.contains(&Action::RequestAccessibility));
         assert!(!acts.contains(&Action::StartShortcutCapture));
+    }
+
+    #[test]
+    fn the_recording_indicator_can_be_styled_placed_or_turned_off() {
+        let mut s = ready();
+        s.settings.overlay_style = OverlayStyle::Live;
+        let screen = build(&s, Tab::Settings);
+        assert!(
+            actions(&screen).contains(&Action::SetChoice(ChoiceKey::OverlayStyle, "none".into()))
+        );
+        assert!(
+            actions(&screen).contains(&Action::SetChoice(ChoiceKey::OverlayPosition, "top".into()))
+        );
+        s.settings.overlay_style = OverlayStyle::None;
+        let screen = build(&s, Tab::Settings);
+        assert!(!rows(&screen)
+            .iter()
+            .any(|r| r.id == "settings.overlay_position"));
     }
 
     #[test]
