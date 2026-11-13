@@ -647,7 +647,6 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
             watch_permissions(app);
             Ok(())
         }
-        Action::SetBool(key, on) => set_bool(app, key, on),
         // Switching audio devices restarts the audio stream, which can block
         // for a while: keep it off the main thread so the popover stays live.
         Action::SetChoice(key @ (ChoiceKey::Microphone | ChoiceKey::OutputDevice), value) => {
@@ -658,6 +657,7 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
             in_background(app, move |a| set_bool(a, BoolKey::AlwaysOnMicrophone, on));
             Ok(())
         }
+        Action::SetBool(key, on) => set_bool(app, key, on),
         Action::SetChoice(key, value) => {
             let r = set_choice(app, key, value);
             if matches!(key, ChoiceKey::Language) {

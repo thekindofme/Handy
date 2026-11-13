@@ -26,6 +26,10 @@ use std::sync::Mutex;
 use tauri::AppHandle;
 
 const HEIGHT: f64 = 36.0;
+/// Width once live text opens the pill into a card (upstream's Live size).
+const OPEN_WIDTH: f64 = 400.0;
+/// Roughly three lines of 13pt text at that width.
+const MAX_TEXT_CHARS: usize = 165;
 const MARGIN: f64 = 46.0;
 const BARS: usize = 16;
 
@@ -49,6 +53,12 @@ struct Hud {
     levels: Retained<LevelsView>,
     spinner: Retained<NSProgressIndicator>,
     label: Retained<NSTextField>,
+    /// Live text above the pill (bottom position) or below it (top).
+    text_above: Retained<NSTextField>,
+    text_below: Retained<NSTextField>,
+    open_width: Retained<objc2_app_kit::NSLayoutConstraint>,
+    committed: String,
+    tentative: String,
     mode: Mode,
 }
 
@@ -148,6 +158,20 @@ fn build(mtm: MainThreadMarker) -> Hud {
     label.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
     label.setTranslatesAutoresizingMaskIntoConstraints(false);
 
+    let text_field = || {
+        let t = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
+        t.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        t.setTextColor(Some(&NSColor::whiteColor()));
+        t.setPreferredMaxLayoutWidth(OPEN_WIDTH - 32.0);
+        t.setMaximumNumberOfLines(3);
+        t.setSelectable(false);
+        t.setTranslatesAutoresizingMaskIntoConstraints(false);
+        t.setHidden(true);
+        t
+    };
+    let text_above = text_field();
+    let text_below = text_field();
+
     let views: [&NSView; 4] = [&icon, &levels, &spinner, &label];
     let row = NSStackView::stackViewWithViews(&NSArray::from_slice(&views), mtm);
     row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
@@ -159,7 +183,14 @@ fn build(mtm: MainThreadMarker) -> Hud {
         right: 14.0,
     });
     row.setTranslatesAutoresizingMaskIntoConstraints(false);
-    card.setContentView(Some(&row));
+    let parts: [&NSView; 3] = [&text_above, &row, &text_below];
+    let column = NSStackView::stackViewWithViews(&NSArray::from_slice(&parts), mtm);
+    column.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    column.setAlignment(objc2_app_kit::NSLayoutAttribute::Leading);
+    column.setSpacing(4.0);
+    column.setTranslatesAutoresizingMaskIntoConstraints(false);
+    card.setContentView(Some(&column));
+    let open_width = card.widthAnchor().constraintEqualToConstant(OPEN_WIDTH);
     let constraints = [
         icon.widthAnchor().constraintEqualToConstant(16.0),
         icon.heightAnchor().constraintEqualToConstant(16.0),
@@ -170,12 +201,30 @@ fn build(mtm: MainThreadMarker) -> Hud {
         label
             .widthAnchor()
             .constraintLessThanOrEqualToConstant(460.0),
-        row.leadingAnchor()
+        row.heightAnchor().constraintEqualToConstant(HEIGHT),
+        text_above
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&column.leadingAnchor(), 16.0),
+        text_above
+            .trailingAnchor()
+            .constraintEqualToAnchor_constant(&column.trailingAnchor(), -16.0),
+        text_below
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&column.leadingAnchor(), 16.0),
+        text_below
+            .trailingAnchor()
+            .constraintEqualToAnchor_constant(&column.trailingAnchor(), -16.0),
+        column
+            .leadingAnchor()
             .constraintEqualToAnchor(&card.leadingAnchor()),
-        row.trailingAnchor()
+        column
+            .trailingAnchor()
             .constraintEqualToAnchor(&card.trailingAnchor()),
-        row.topAnchor().constraintEqualToAnchor(&card.topAnchor()),
-        row.bottomAnchor()
+        column
+            .topAnchor()
+            .constraintEqualToAnchor(&card.topAnchor()),
+        column
+            .bottomAnchor()
             .constraintEqualToAnchor(&card.bottomAnchor()),
     ];
     let refs: Vec<&objc2_app_kit::NSLayoutConstraint> = constraints.iter().map(|c| &**c).collect();
@@ -193,6 +242,11 @@ fn build(mtm: MainThreadMarker) -> Hud {
         levels,
         spinner,
         label,
+        text_above,
+        text_below,
+        open_width,
+        committed: String::new(),
+        tentative: String::new(),
         mode: Mode::Notice,
     }
 }
@@ -217,8 +271,29 @@ fn symbol(name: &str, tint: Retained<NSColor>, view: &NSImageView) {
 /// Sizes the panel to its content and places it on the screen with the
 /// pointer, at the top or bottom as set.
 fn place(hud: &Hud, app: &AppHandle) {
+    let position = settings::get_settings(app).overlay_position;
+    let open = !hud.committed.is_empty() || !hud.tentative.is_empty();
+    // The text sits on the side away from the screen edge, like upstream.
+    let (shown, other) = match position {
+        OverlayPosition::Bottom => (&hud.text_above, &hud.text_below),
+        OverlayPosition::Top => (&hud.text_below, &hud.text_above),
+    };
+    other.setHidden(true);
+    shown.setHidden(!open);
+    if open {
+        shown.setAttributedStringValue(&live_string(&hud.committed, &hud.tentative));
+    }
+    hud.open_width.setActive(open);
+    hud.card
+        .setCornerRadius(if open { 16.0 } else { HEIGHT / 2.0 });
+    hud.card.layoutSubtreeIfNeeded();
     let fit = hud.card.fittingSize();
-    let width = fit.width.max(120.0);
+    let width = if open {
+        OPEN_WIDTH
+    } else {
+        fit.width.max(120.0)
+    };
+    let height = fit.height.max(HEIGHT);
     let mouse = NSEvent::mouseLocation();
     let mtm = MainThreadMarker::from(&*hud.panel);
     let screens = NSScreen::screens(mtm);
@@ -235,12 +310,13 @@ fn place(hud: &Hud, app: &AppHandle) {
     let Some(screen) = screen else { return };
     let visible = screen.visibleFrame();
     let x = visible.origin.x + (visible.size.width - width) / 2.0;
-    let y = match settings::get_settings(app).overlay_position {
-        OverlayPosition::Top => visible.origin.y + visible.size.height - HEIGHT - 12.0,
+    // Grow away from the edge so the pill row stays put as text arrives.
+    let y = match position {
+        OverlayPosition::Top => visible.origin.y + visible.size.height - height - 12.0,
         OverlayPosition::Bottom => visible.origin.y + MARGIN,
     };
     hud.panel.setFrame_display(
-        NSRect::new(NSPoint::new(x, y), NSSize::new(width, HEIGHT)),
+        NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)),
         true,
     );
 }
@@ -291,10 +367,78 @@ fn present(app: &AppHandle, mode: Mode, text: String) {
     });
 }
 
+/// The last ~3 lines of text: recognised words in white, words the model
+/// may still change dimmer.
+fn live_string(
+    committed: &str,
+    tentative: &str,
+) -> Retained<objc2_foundation::NSMutableAttributedString> {
+    use objc2_foundation::{NSMutableAttributedString, NSRange};
+    use objc2::AllocAnyThread;
+    let (committed, tentative) = tail(committed.trim(), tentative.trim(), MAX_TEXT_CHARS);
+    let sep = if committed.is_empty() || tentative.is_empty() {
+        ""
+    } else {
+        " "
+    };
+    let full = format!("{committed}{sep}{tentative}");
+    let ns = NSString::from_str(&full);
+    let s = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &ns);
+    let all = NSRange::new(0, ns.length());
+    let solid = (committed.encode_utf16().count() + sep.len()).min(ns.length());
+    unsafe {
+        s.addAttribute_value_range(
+            objc2_app_kit::NSFontAttributeName,
+            &NSFont::systemFontOfSize(13.0),
+            all,
+        );
+        s.addAttribute_value_range(
+            objc2_app_kit::NSForegroundColorAttributeName,
+            &NSColor::whiteColor(),
+            all,
+        );
+        s.addAttribute_value_range(
+            objc2_app_kit::NSForegroundColorAttributeName,
+            &NSColor::colorWithWhite_alpha(1.0, 0.55),
+            NSRange::new(solid, ns.length() - solid),
+        );
+    }
+    s
+}
+
+/// Keeps the newest `max` characters, cut at a word and marked with "…".
+pub(crate) fn tail(committed: &str, tentative: &str, max: usize) -> (String, String) {
+    let t_len = tentative.chars().count();
+    if t_len >= max {
+        let cut: String = tentative.chars().skip(t_len - max).collect();
+        let cut = cut.split_once(' ').map(|(_, r)| r).unwrap_or(&cut);
+        return (String::new(), format!("…{cut}"));
+    }
+    let room = max - t_len;
+    let c_len = committed.chars().count();
+    if c_len <= room {
+        return (committed.to_string(), tentative.to_string());
+    }
+    let cut: String = committed.chars().skip(c_len - room).collect();
+    let cut = cut.split_once(' ').map(|(_, r)| r).unwrap_or(&cut);
+    (format!("…{cut}"), tentative.to_string())
+}
+
 /// `state` is overlay.rs's: recording, streaming, transcribing, processing.
 pub fn show(app: &AppHandle, state: &str) {
     if let Ok(mut l) = LEVELS.lock() {
         l.clear();
+    }
+    // A new recording starts with no text; finishing keeps it on screen.
+    if matches!(state, "recording" | "streaming") {
+        let app2 = app.clone();
+        on_main(app, move |mtm| {
+            with_hud(mtm, |hud| {
+                hud.committed.clear();
+                hud.tentative.clear();
+                let _ = &app2;
+            })
+        });
     }
     match state {
         "recording" | "streaming" => present(app, Mode::Listening, "Listening".into()),
@@ -308,15 +452,13 @@ pub fn live_text(app: &AppHandle, committed: &str, tentative: &str) {
     if settings::get_settings(app).overlay_style != OverlayStyle::Live {
         return;
     }
-    let text = format!("{committed}{tentative}").trim().to_string();
-    if text.is_empty() {
-        return;
-    }
+    let (committed, tentative) = (committed.to_string(), tentative.to_string());
     let app2 = app.clone();
     on_main(app, move |mtm| {
         with_hud(mtm, |hud| {
             if hud.mode == Mode::Listening && hud.panel.isVisible() {
-                hud.label.setStringValue(&NSString::from_str(&text));
+                hud.committed = committed;
+                hud.tentative = tentative;
                 place(hud, &app2);
             }
         });
@@ -340,9 +482,11 @@ pub fn hide(app: &AppHandle) {
     GENERATION.fetch_add(1, Ordering::SeqCst);
     on_main(app, |_| {
         HUD.with(|cell| {
-            if let Some(hud) = cell.borrow().as_ref() {
+            if let Some(hud) = cell.borrow_mut().as_mut() {
                 unsafe { hud.spinner.stopAnimation(None) };
                 hud.panel.orderOut(None);
+                hud.committed.clear();
+                hud.tentative.clear();
             }
         });
     });
@@ -367,4 +511,34 @@ pub fn levels(app: &AppHandle, levels: &[f32]) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tail;
+
+    #[test]
+    fn short_text_is_kept_whole() {
+        assert_eq!(
+            tail("hello there", "gen", 50),
+            ("hello there".into(), "gen".into())
+        );
+    }
+
+    #[test]
+    fn long_text_keeps_the_newest_words() {
+        let (c, t) = tail("one two three four five six", "seven", 18);
+        assert_eq!(t, "seven");
+        assert!(c.starts_with('…'));
+        assert!(c.ends_with("six"));
+        assert!(c.chars().count() + t.chars().count() <= 19);
+        assert!(!c.contains("two"), "oldest words drop first: {c}");
+    }
+
+    #[test]
+    fn a_long_tentative_tail_wins() {
+        let (c, t) = tail("old words", "alpha beta gamma delta", 10);
+        assert!(c.is_empty());
+        assert!(t.starts_with('…') && t.ends_with("delta"));
+    }
 }
