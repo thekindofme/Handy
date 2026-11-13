@@ -79,6 +79,7 @@ pub enum BoolKey {
     CommandPrewarm,
     AppHints,
     ScreenText,
+    ReliablePaste,
 }
 
 impl BoolKey {
@@ -105,6 +106,7 @@ impl BoolKey {
             BoolKey::AlwaysOnMicrophone => s.always_on_microphone,
             BoolKey::AutoSubmit => s.auto_submit,
             BoolKey::FillerWordRemoval => s.filler_word_removal_enabled,
+            BoolKey::ReliablePaste => s.reliable_paste,
             BoolKey::VoiceActivityDetection => s.vad_enabled,
         }
     }
@@ -125,6 +127,7 @@ impl BoolKey {
             BoolKey::CommandPrewarm => "command_prewarm",
             BoolKey::AppHints => "app_hints",
             BoolKey::ScreenText => "screen_text",
+            BoolKey::ReliablePaste => "reliable_paste",
         }
     }
 }
@@ -1299,6 +1302,13 @@ fn settings(s: &Snapshot) -> Vec<Block> {
         ),
         switch_row(
             "settings",
+            BoolKey::ReliablePaste,
+            "Wait until the app has the text",
+            s,
+        )
+        .detail("Stops your old clipboard being pasted instead"),
+        switch_row(
+            "settings",
             BoolKey::AppendTrailingSpace,
             "Add a space after",
             s,
@@ -2366,6 +2376,7 @@ mod tests {
             BoolKey::AutoSubmit,
             BoolKey::FillerWordRemoval,
             BoolKey::VoiceActivityDetection,
+            BoolKey::ReliablePaste,
         ];
         let mut ids: Vec<_> = keys.iter().map(|k| k.id()).collect();
         ids.sort();

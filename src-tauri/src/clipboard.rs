@@ -77,6 +77,7 @@ fn paste_via_clipboard(
     paste_method: &PasteMethod,
     paste_delay_ms: u64,
     paste_delay_after_ms: u64,
+    restore: bool,
 ) -> Result<(), String> {
     let clipboard = app_handle.clipboard();
     let saved_text = clipboard.read_text().ok().filter(|t| !t.is_empty());
@@ -120,6 +121,11 @@ fn paste_via_clipboard(
         Ok(())
     })();
 
+    if !restore {
+        // Leave the transcript on the clipboard: a target that reads late gets
+        // the transcript, never the old clipboard.
+        return paste_result;
+    }
     finish_clipboard_paste(paste_result, paste_delay_after_ms, || {
         // Restore original clipboard content even when key injection failed.
         // Text takes priority so this path stays identical to the previous behavior;
@@ -857,6 +863,10 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
             // On success it fully handles the paste (including auto-submit and
             // clipboard handling) asynchronously; on failure fall through to
             // the legacy path untouched.
+            // Handy Bar: once the receipt-based paste is on, its fallback must
+            // not bring back the fixed-delay restore it exists to avoid.
+            #[allow(unused_mut)]
+            let mut restore = true;
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if settings.reliable_paste {
                 // Runs entirely on the main thread, as it requires.
@@ -880,7 +890,14 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                 match reliable_result {
                     Ok(()) => return Ok(()),
                     Err(e) => {
-                        log::warn!("Reliable paste unavailable ({e}); falling back to legacy paste")
+                        log::warn!(
+                            "Reliable paste unavailable ({e}); falling back to legacy paste"
+                        );
+                        #[cfg(target_os = "macos")]
+                        if crate::menubar::enabled() {
+                            log::warn!("Leaving the transcript on the clipboard so a late read can't get the old one");
+                            restore = false;
+                        }
                     }
                 }
             }
@@ -890,6 +907,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                 &paste_method,
                 paste_delay_ms,
                 paste_delay_after_ms,
+                restore,
             )?
         }
         PasteMethod::ExternalScript => {

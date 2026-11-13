@@ -108,6 +108,7 @@ fn flash(app: &AppHandle, message: impl Into<String>) {
 /// Sets up state and listeners. Call once from `setup`, after the managers.
 pub fn install(app: &AppHandle) {
     app.manage(MenubarState::default());
+    enable_reliable_paste_once(app);
     listen(app);
     refresh_devices(app);
 
@@ -159,6 +160,28 @@ pub fn configure_tray(
 pub fn on_tray_click(app: &AppHandle) {
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || appkit::toggle(&app2));
+}
+
+/// Handy's fixed-delay paste restores the old clipboard after 60 ms, which
+/// a busy app can read before the transcript (it pastes your previous
+/// clipboard). Handy Bar turns on Handy's receipt-based paste, which waits
+/// for the app to read it, once per install; the switch in Settings ›
+/// Pasting can turn it off again.
+fn enable_reliable_paste_once(app: &AppHandle) {
+    use tauri_plugin_store::StoreExt;
+    const KEY: &str = "handybar_reliable_paste_default";
+    let Ok(store) = app.store(crate::portable::store_path(settings::SETTINGS_STORE_PATH)) else {
+        return;
+    };
+    if store.get(KEY).is_some() {
+        return;
+    }
+    store.set(KEY, serde_json::Value::Bool(true));
+    if !settings::get_settings(app).reliable_paste {
+        if let Err(e) = crate::shortcut::change_reliable_paste_setting(app.clone(), true) {
+            warn!("Menu bar: couldn't turn on reliable paste: {e}");
+        }
+    }
 }
 
 /// Whether the popover is on screen.
@@ -555,6 +578,7 @@ fn set_bool(app: &AppHandle, key: BoolKey, on: bool) -> Result<(), String> {
         BoolKey::FillerWordRemoval => sc::change_filler_word_removal_enabled_setting(a, on),
         BoolKey::VoiceActivityDetection => sc::change_vad_enabled_setting(a, on),
         BoolKey::PostProcess => sc::change_post_process_enabled_setting(a, on),
+        BoolKey::ReliablePaste => sc::change_reliable_paste_setting(a, on),
         BoolKey::CommandPrewarm => {
             update_command(app, |c| c.prewarm = on);
             Ok(())
