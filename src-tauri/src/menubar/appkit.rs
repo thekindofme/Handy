@@ -26,6 +26,7 @@ use objc2_foundation::{
     NSSize, NSString,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
@@ -41,17 +42,28 @@ enum Slot {
     Tabs,
 }
 
+/// One tab's built views. Kept while the popover is open so switching back
+/// to a tab is a swap, not a rebuild.
+struct Tree {
+    /// What it was built from; an equal screen means nothing to redraw.
+    screen: Screen,
+    outer: Retained<NSStackView>,
+    scroll: Retained<NSScrollView>,
+    slots: Vec<Slot>,
+    /// Tags carry this so a control from a replaced tree can't fire.
+    generation: isize,
+    height: f64,
+}
+
 struct Ui {
     app: AppHandle,
     popover: Retained<NSPopover>,
     root: Retained<NSView>,
     target: Retained<Target>,
-    slots: Vec<Slot>,
-    /// Bumped on every rebuild; tags carry it so a stale control can't fire
-    /// an action meant for the new tree.
-    generation: isize,
-    scroll: Option<Retained<NSScrollView>>,
-    tab: Tab,
+    trees: HashMap<Tab, Tree>,
+    /// The tab on screen.
+    shown: Option<Tab>,
+    next_generation: isize,
 }
 
 thread_local! {
@@ -112,10 +124,11 @@ fn on_control(sender: &NSView) {
     let action = UI.with(|cell| {
         let ui = cell.borrow();
         let ui = ui.as_ref()?;
-        if tag / GEN_STRIDE != ui.generation {
+        let tree = ui.trees.get(&ui.shown?)?;
+        if tag / GEN_STRIDE != tree.generation {
             return None;
         }
-        let slot = ui.slots.get((tag % GEN_STRIDE) as usize)?;
+        let slot = tree.slots.get((tag % GEN_STRIDE) as usize)?;
         let action = match slot {
             Slot::Fixed(a) => a.clone(),
             Slot::Switch(key) => {
@@ -168,6 +181,8 @@ fn ensure_ui(app: &AppHandle, mtm: MainThreadMarker) {
         popover.setBehavior(NSPopoverBehavior::Transient);
         popover.setAnimates(true);
         let root = NSView::new(mtm);
+        // Once: the root outlives every rebuild.
+        activate(&[root.widthAnchor().constraintEqualToConstant(WIDTH)]);
         let vc = NSViewController::new(mtm);
         vc.setView(&root);
         popover.setContentViewController(Some(&vc));
@@ -178,10 +193,9 @@ fn ensure_ui(app: &AppHandle, mtm: MainThreadMarker) {
             popover,
             root,
             target,
-            slots: Vec::new(),
-            generation: 0,
-            scroll: None,
-            tab: Tab::Home,
+            trees: HashMap::new(),
+            shown: None,
+            next_generation: 1,
         });
     });
 }
@@ -195,14 +209,40 @@ fn is_shown() -> bool {
 }
 
 pub fn toggle(app: &AppHandle) {
-    let just_closed = LAST_CLOSED
-        .with(|c| c.get())
-        .is_some_and(|t| t.elapsed() < Duration::from_millis(400));
-    if is_shown() {
+    let since_close = LAST_CLOSED.with(|c| c.get()).map(|t| t.elapsed());
+    let just_closed = since_close.is_some_and(|t| t < Duration::from_millis(400));
+    let shown = is_shown();
+    let visible = popover_window().is_some_and(|w| w.isVisible());
+    let app_ns = MainThreadMarker::new().map(NSApplication::sharedApplication);
+    log::debug!(
+        "Menu bar click: shown={shown} visible={visible} since_close={since_close:?} \
+         app_hidden={:?} app_active={:?}",
+        app_ns.as_ref().map(|a| a.isHidden()),
+        app_ns.as_ref().map(|a| a.isActive()),
+    );
+    if shown && visible {
         close();
+    } else if shown {
+        // AppKit says the popover is open but nothing is on screen (seen
+        // under heavy load, and when the app was hidden). The click is
+        // meant to open it, so reopen instead of "closing" an invisible one.
+        log::info!("Menu bar: popover was open but not on screen; reopening");
+        if let Some(p) = popover() {
+            // Without animation, so it's fully closed before we reopen.
+            p.setAnimates(false);
+            p.close();
+            p.setAnimates(true);
+        }
+        show(app);
     } else if !just_closed {
         show(app);
     }
+}
+
+fn popover_window() -> Option<Retained<objc2_app_kit::NSWindow>> {
+    popover()
+        .and_then(|p| p.contentViewController())
+        .and_then(|vc| vc.view().window())
 }
 
 fn popover() -> Option<Retained<NSPopover>> {
@@ -221,6 +261,11 @@ pub fn show(app: &AppHandle) {
     super::refresh_devices(app);
     rebuild(app, mtm);
     let app_ns = NSApplication::sharedApplication(mtm);
+    // A dictation started from the popover hides the app to hand focus back;
+    // a hidden app's popover is "shown" but never drawn.
+    if app_ns.isHidden() {
+        app_ns.unhideWithoutActivation();
+    }
     #[allow(deprecated)]
     app_ns.activateIgnoringOtherApps(true);
     // Called outside the UI borrow: showing and closing call our delegate.
@@ -232,13 +277,14 @@ pub fn show(app: &AppHandle) {
                 NSRectEdge::MinY,
             );
         }
-        if let Some(window) = popover
-            .contentViewController()
-            .and_then(|vc| vc.view().window())
-        {
+        if let Some(window) = popover_window() {
+            // macOS may refuse to activate us (cooperative activation), which
+            // can leave the popover's window ordered out. Put it up anyway.
+            window.orderFrontRegardless();
             window.makeKeyWindow();
         }
     }
+    prebuild_other_tabs(app);
 }
 
 fn close() {
@@ -255,9 +301,8 @@ fn release_views() {
             for sub in ui.root.subviews().iter() {
                 sub.removeFromSuperview();
             }
-            ui.slots.clear();
-            ui.scroll = None;
-            ui.generation += 1;
+            ui.trees.clear();
+            ui.shown = None;
         }
     });
 }
@@ -746,129 +791,189 @@ impl Builder<'_> {
 
 fn rebuild(app: &AppHandle, mtm: MainThreadMarker) {
     let tab = super::current_tab(app);
+    prepare(app, mtm, tab, true);
+}
+
+/// Builds the other tabs one per main-loop turn after the popover opens, so
+/// the first switch to each is instant without delaying the open.
+pub fn prebuild_other_tabs(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        for tab in [Tab::Home, Tab::History, Tab::Models, Tab::Settings] {
+            std::thread::sleep(Duration::from_millis(30));
+            let app2 = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                if is_shown() && super::current_tab(&app2) != tab {
+                    prepare(&app2, mtm, tab, false);
+                }
+            });
+        }
+    });
+}
+
+/// Makes sure `tab`'s views match the current state, rebuilding only if they
+/// don't, and puts them on screen when `show` is set.
+fn prepare(app: &AppHandle, mtm: MainThreadMarker, tab: Tab, show: bool) {
+    let started = Instant::now();
     let snapshot = super::snapshot(app);
+    let snapshot_took = started.elapsed();
     let screen = super::view::build(&snapshot, tab);
 
     UI.with(|cell| {
         let mut guard = cell.borrow_mut();
         let Some(ui) = guard.as_mut() else { return };
-
-        // Keep the scroll position across refreshes of the same tab.
-        let offset = if ui.tab == tab {
-            ui.scroll
-                .as_ref()
-                .map(|s| s.contentView().bounds().origin.y)
-                .unwrap_or(0.0)
-        } else {
-            0.0
-        };
-
-        ui.generation += 1;
-        let mut b = Builder {
-            mtm,
-            target: &ui.target,
-            slots: Vec::new(),
-            generation: ui.generation,
-        };
-
-        let header = b.header(&screen);
-        let tabs = b.tabs(&screen);
-        let blocks: Vec<Retained<NSView>> = screen.blocks.iter().map(|bl| b.block(bl)).collect();
-        let content = column(mtm, 12.0, PAD, &blocks);
-        content.setEdgeInsets(NSEdgeInsets {
-            top: 2.0,
-            left: 0.0,
-            bottom: 12.0,
-            right: 0.0,
-        });
-        let footer_label = label(mtm, &screen.footer, 11.0, false, true);
-        set_identifier(&footer_label, "footer.version");
-        let quit = b.button(&ButtonSpec {
-            id: "footer.quit".into(),
-            title: "Quit Handy".into(),
-            action: Action::Quit,
-            prominent: false,
-        });
-        let footer = stack(
-            mtm,
-            false,
-            8.0,
-            &[upcast(&*footer_label), spacer(mtm), quit],
-        );
-        let slots = std::mem::take(&mut b.slots);
-
-        // Scrollable middle: a flipped document view holding the blocks.
-        let doc: Retained<FlippedView> =
-            unsafe { msg_send![FlippedView::alloc(mtm), initWithFrame: NSRect::ZERO] };
-        no_autoresize(&doc);
-        doc.addSubview(&content);
-        pin_all(&content, &doc);
-        let scroll = NSScrollView::new(mtm);
-        scroll.setHasVerticalScroller(true);
-        scroll.setAutohidesScrollers(true);
-        scroll.setDrawsBackground(false);
-        no_autoresize(&scroll);
-        scroll.setDocumentView(Some(&doc));
-        let clip = scroll.contentView();
-        activate(&[
-            doc.leadingAnchor()
-                .constraintEqualToAnchor(&clip.leadingAnchor()),
-            doc.trailingAnchor()
-                .constraintEqualToAnchor(&clip.trailingAnchor()),
-            doc.topAnchor().constraintEqualToAnchor(&clip.topAnchor()),
-        ]);
-        set_identifier(&scroll, "content");
-
-        // Measure the blocks at the popover's width to size the scroll area.
-        let measure = content.widthAnchor().constraintEqualToConstant(WIDTH);
-        measure.setActive(true);
-        let content_height = content.fittingSize().height;
-        measure.setActive(false);
-        let scroll_height = content_height.min(MAX_SCROLL);
-        activate(&[scroll
-            .heightAnchor()
-            .constraintEqualToConstant(scroll_height)]);
-
-        // Replace the old tree.
-        for sub in ui.root.subviews().iter() {
-            sub.removeFromSuperview();
+        let fresh = ui.trees.get(&tab).is_some_and(|t| t.screen == screen);
+        if !fresh {
+            // Keep the scroll position when redrawing the tab on screen.
+            let offset = match (ui.shown == Some(tab), ui.trees.get(&tab)) {
+                (true, Some(old)) => old.scroll.contentView().bounds().origin.y,
+                _ => 0.0,
+            };
+            let generation = ui.next_generation;
+            ui.next_generation += 1;
+            let tree = build_tree(mtm, &ui.target, screen, generation);
+            let on_screen = ui.shown == Some(tab);
+            ui.trees.insert(tab, tree);
+            if on_screen {
+                ui.shown = None; // force the swap below
+                swap_in(ui, tab);
+                if offset > 0.0 {
+                    if let Some(doc) = ui.trees[&tab].scroll.documentView() {
+                        doc.scrollPoint(NSPoint::new(0.0, offset));
+                    }
+                }
+            }
+            log::debug!(
+                "Menu bar built {tab:?} in {:?} ({:?} reading state)",
+                started.elapsed(),
+                snapshot_took
+            );
         }
-        let scroll_view: Retained<NSView> = upcast(&*scroll.clone());
-        let outer = column(
-            mtm,
-            10.0,
-            0.0,
-            &[
-                header.clone(),
-                tabs.clone(),
-                scroll_view.clone(),
-                upcast(&*footer.clone()),
-            ],
-        );
-        ui.root.addSubview(&outer);
-        pin_all(&outer, &ui.root);
-        // Header, tabs and footer get side padding; the scroll area runs edge
-        // to edge so its scroller sits at the popover's edge.
-        outer.setEdgeInsets(NSEdgeInsets {
-            top: PAD,
-            left: 0.0,
-            bottom: 10.0,
-            right: 0.0,
-        });
-        activate(&[ui.root.widthAnchor().constraintEqualToConstant(WIDTH)]);
-        re_pad(&outer, &[&header, &tabs, &upcast(&*footer)]);
-
-        let size = outer.fittingSize();
-        ui.popover.setContentSize(NSSize::new(WIDTH, size.height));
-        ui.root.layoutSubtreeIfNeeded();
-        if offset > 0.0 {
-            doc.scrollPoint(NSPoint::new(0.0, offset));
+        if show && ui.shown != Some(tab) {
+            swap_in(ui, tab);
         }
-
-        ui.slots = slots;
-        ui.scroll = Some(scroll);
-        ui.tab = tab;
     });
+}
+
+/// Puts a built tab on screen.
+fn swap_in(ui: &mut Ui, tab: Tab) {
+    let Some(tree) = ui.trees.get(&tab) else {
+        return;
+    };
+    for sub in ui.root.subviews().iter() {
+        sub.removeFromSuperview();
+    }
+    ui.root.addSubview(&tree.outer);
+    pin_all(&tree.outer, &ui.root);
+    ui.popover.setContentSize(NSSize::new(WIDTH, tree.height));
+    ui.root.layoutSubtreeIfNeeded();
+    ui.shown = Some(tab);
+}
+
+fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation: isize) -> Tree {
+    let mut b = Builder {
+        mtm,
+        target,
+        slots: Vec::new(),
+        generation,
+    };
+
+    let header = b.header(&screen);
+    let tabs = b.tabs(&screen);
+    let blocks: Vec<Retained<NSView>> = screen.blocks.iter().map(|bl| b.block(bl)).collect();
+    let content = column(mtm, 12.0, PAD, &blocks);
+    content.setEdgeInsets(NSEdgeInsets {
+        top: 2.0,
+        left: 0.0,
+        bottom: 12.0,
+        right: 0.0,
+    });
+    let footer_label = label(mtm, &screen.footer, 11.0, false, true);
+    set_identifier(&footer_label, "footer.version");
+    let quit = b.button(&ButtonSpec {
+        id: "footer.quit".into(),
+        title: "Quit Handy".into(),
+        action: Action::Quit,
+        prominent: false,
+    });
+    let footer = stack(
+        mtm,
+        false,
+        8.0,
+        &[upcast(&*footer_label), spacer(mtm), quit],
+    );
+    let slots = std::mem::take(&mut b.slots);
+
+    // Scrollable middle: a flipped document view holding the blocks.
+    let doc: Retained<FlippedView> =
+        unsafe { msg_send![FlippedView::alloc(mtm), initWithFrame: NSRect::ZERO] };
+    no_autoresize(&doc);
+    doc.addSubview(&content);
+    pin_all(&content, &doc);
+    let scroll = NSScrollView::new(mtm);
+    scroll.setHasVerticalScroller(true);
+    scroll.setAutohidesScrollers(true);
+    scroll.setDrawsBackground(false);
+    no_autoresize(&scroll);
+    scroll.setDocumentView(Some(&doc));
+    let clip = scroll.contentView();
+    activate(&[
+        doc.leadingAnchor()
+            .constraintEqualToAnchor(&clip.leadingAnchor()),
+        doc.trailingAnchor()
+            .constraintEqualToAnchor(&clip.trailingAnchor()),
+        doc.topAnchor().constraintEqualToAnchor(&clip.topAnchor()),
+    ]);
+    set_identifier(&scroll, "content");
+
+    // Measure the blocks at the popover's width to size the scroll area.
+    let measure = content.widthAnchor().constraintEqualToConstant(WIDTH);
+    measure.setActive(true);
+    let content_height = content.fittingSize().height;
+    measure.setActive(false);
+    let scroll_height = content_height.min(MAX_SCROLL);
+    activate(&[scroll
+        .heightAnchor()
+        .constraintEqualToConstant(scroll_height)]);
+
+    let scroll_view: Retained<NSView> = upcast(&*scroll.clone());
+    let outer = column(
+        mtm,
+        10.0,
+        0.0,
+        &[
+            header.clone(),
+            tabs.clone(),
+            scroll_view,
+            upcast(&*footer.clone()),
+        ],
+    );
+    // Header, tabs and footer get side padding; the scroll area runs edge
+    // to edge so its scroller sits at the popover's edge.
+    outer.setEdgeInsets(NSEdgeInsets {
+        top: PAD,
+        left: 0.0,
+        bottom: 10.0,
+        right: 0.0,
+    });
+    re_pad(&outer, &[&header, &tabs, &upcast(&*footer)]);
+    // Measured on its own at the popover's width, before it is on screen.
+    let width = outer.widthAnchor().constraintEqualToConstant(WIDTH);
+    width.setActive(true);
+    let height = outer.fittingSize().height;
+    width.setActive(false);
+
+    Tree {
+        screen,
+        outer,
+        scroll,
+        slots,
+        generation,
+        height,
+    }
 }
 
 /// Swaps the zero-inset width constraints `column` put on `views` for ones

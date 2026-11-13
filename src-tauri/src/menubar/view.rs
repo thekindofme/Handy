@@ -65,7 +65,6 @@ pub enum BoolKey {
     AlwaysOnMicrophone,
     AutoSubmit,
     FillerWordRemoval,
-    UpdateChecks,
     VoiceActivityDetection,
 }
 
@@ -80,7 +79,6 @@ impl BoolKey {
             BoolKey::AlwaysOnMicrophone => s.always_on_microphone,
             BoolKey::AutoSubmit => s.auto_submit,
             BoolKey::FillerWordRemoval => s.filler_word_removal_enabled,
-            BoolKey::UpdateChecks => s.update_checks_enabled,
             BoolKey::VoiceActivityDetection => s.vad_enabled,
         }
     }
@@ -96,7 +94,6 @@ impl BoolKey {
             BoolKey::AlwaysOnMicrophone => "always_on_microphone",
             BoolKey::AutoSubmit => "auto_submit",
             BoolKey::FillerWordRemoval => "filler_word_removal",
-            BoolKey::UpdateChecks => "update_checks",
             BoolKey::VoiceActivityDetection => "vad",
         }
     }
@@ -324,39 +321,42 @@ pub fn pretty_shortcut(binding: &str) -> String {
     if binding.trim().is_empty() {
         return "Not set".to_string();
     }
-    binding
-        .split('+')
-        .filter(|p| !p.is_empty())
+    let parts: Vec<&str> = binding.split('+').filter(|p| !p.is_empty()).collect();
+    let alone = parts.len() == 1;
+    parts
+        .iter()
         .map(|part| {
             let lower = part.to_ascii_lowercase();
-            // handy-keys can name the side: "ctrl_left", "option_right".
-            let side_free = lower
-                .strip_suffix("_left")
-                .or_else(|| lower.strip_suffix("_right"))
-                .unwrap_or(&lower)
-                .to_string();
-            (part, side_free)
-        })
-        .map(|(_part, lower)| match lower.as_str() {
-            "option" | "alt" | "option_left" | "option_right" => "⌥".to_string(),
-            "command" | "cmd" | "super" | "meta" | "command_left" | "command_right" => {
-                "⌘".to_string()
-            }
-            "ctrl" | "control" | "control_left" | "control_right" => "⌃".to_string(),
-            "shift" | "shift_left" | "shift_right" => "⇧".to_string(),
-            "fn" | "function" => "fn".to_string(),
-            "space" => "Space".to_string(),
-            "enter" | "return" => "↩".to_string(),
-            "escape" | "esc" => "⎋".to_string(),
-            "tab" => "⇥".to_string(),
-            "backspace" | "delete" => "⌫".to_string(),
-            other => {
-                let mut c = other.chars();
-                match c.next() {
-                    Some(first) => first.to_uppercase().chain(c).collect(),
-                    None => String::new(),
+            // handy-keys can name the side: "ctrl_left", "command_right".
+            // Say "Right" whenever it matters; say "Left" only for a lone
+            // modifier, where the side is the whole shortcut.
+            let (key, side) = if let Some(k) = lower.strip_suffix("_left") {
+                (k.to_string(), if alone { "Left " } else { "" })
+            } else if let Some(k) = lower.strip_suffix("_right") {
+                (k.to_string(), "Right ")
+            } else {
+                (lower.clone(), "")
+            };
+            let symbol = match key.as_str() {
+                "option" | "alt" => "⌥".to_string(),
+                "command" | "cmd" | "super" | "meta" => "⌘".to_string(),
+                "ctrl" | "control" => "⌃".to_string(),
+                "shift" => "⇧".to_string(),
+                "fn" | "function" => "fn".to_string(),
+                "space" => "Space".to_string(),
+                "enter" | "return" => "↩".to_string(),
+                "escape" | "esc" => "⎋".to_string(),
+                "tab" => "⇥".to_string(),
+                "backspace" | "delete" => "⌫".to_string(),
+                other => {
+                    let mut c = other.chars();
+                    match c.next() {
+                        Some(first) => first.to_uppercase().chain(c).collect(),
+                        None => String::new(),
+                    }
                 }
-            }
+            };
+            format!("{side}{symbol}")
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -1060,7 +1060,6 @@ fn settings(s: &Snapshot) -> Vec<Block> {
 
     let system = vec![
         switch_row("settings", BoolKey::Autostart, "Open at login", s),
-        switch_row("settings", BoolKey::UpdateChecks, "Check for updates", s),
         Row::new(
             "settings.unload_timeout",
             "Free model memory",
@@ -1319,7 +1318,10 @@ mod tests {
         assert_eq!(pretty_shortcut("command+f13"), "⌘ F13");
         assert_eq!(pretty_shortcut("fn"), "fn");
         assert_eq!(pretty_shortcut("ctrl_left+shift_left+k"), "⌃ ⇧ K");
-        assert_eq!(pretty_shortcut("option_right+space"), "⌥ Space");
+        assert_eq!(pretty_shortcut("command_right"), "Right ⌘");
+        assert_eq!(pretty_shortcut("option_left"), "Left ⌥");
+        assert_eq!(pretty_shortcut("ctrl_right+k"), "Right ⌃ K");
+        assert_eq!(pretty_shortcut("option_right+space"), "Right ⌥ Space");
         assert_eq!(pretty_shortcut(""), "Not set");
     }
 
@@ -1591,7 +1593,6 @@ mod tests {
             BoolKey::AlwaysOnMicrophone,
             BoolKey::AutoSubmit,
             BoolKey::FillerWordRemoval,
-            BoolKey::UpdateChecks,
             BoolKey::VoiceActivityDetection,
         ];
         let mut ids: Vec<_> = keys.iter().map(|k| k.id()).collect();

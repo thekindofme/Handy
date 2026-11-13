@@ -56,6 +56,7 @@ struct Hud {
     /// Live text above the pill (bottom position) or below it (top).
     text_above: Retained<NSTextField>,
     text_below: Retained<NSTextField>,
+    column: Retained<NSStackView>,
     open_width: Retained<objc2_app_kit::NSLayoutConstraint>,
     committed: String,
     tentative: String,
@@ -186,7 +187,9 @@ fn build(mtm: MainThreadMarker) -> Hud {
     let parts: [&NSView; 3] = [&text_above, &row, &text_below];
     let column = NSStackView::stackViewWithViews(&NSArray::from_slice(&parts), mtm);
     column.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-    column.setAlignment(objc2_app_kit::NSLayoutAttribute::Leading);
+    // Centred: the mic row stays in the middle when the card opens for text;
+    // the text lines are pinned edge to edge below.
+    column.setAlignment(objc2_app_kit::NSLayoutAttribute::CenterX);
     column.setSpacing(4.0);
     column.setTranslatesAutoresizingMaskIntoConstraints(false);
     card.setContentView(Some(&column));
@@ -244,6 +247,7 @@ fn build(mtm: MainThreadMarker) -> Hud {
         label,
         text_above,
         text_below,
+        column,
         open_width,
         committed: String::new(),
         tentative: String::new(),
@@ -283,6 +287,22 @@ fn place(hud: &Hud, app: &AppHandle) {
     if open {
         shown.setAttributedStringValue(&live_string(&hud.committed, &hud.tentative));
     }
+    // Room between the text and the card's edge on the side it grows into.
+    let pad = if open { 12.0 } else { 0.0 };
+    hud.column.setEdgeInsets(NSEdgeInsets {
+        top: if matches!(position, OverlayPosition::Bottom) {
+            pad
+        } else {
+            0.0
+        },
+        left: 0.0,
+        bottom: if matches!(position, OverlayPosition::Top) {
+            pad
+        } else {
+            0.0
+        },
+        right: 0.0,
+    });
     hud.open_width.setActive(open);
     hud.card
         .setCornerRadius(if open { 16.0 } else { HEIGHT / 2.0 });
@@ -373,8 +393,8 @@ fn live_string(
     committed: &str,
     tentative: &str,
 ) -> Retained<objc2_foundation::NSMutableAttributedString> {
-    use objc2_foundation::{NSMutableAttributedString, NSRange};
     use objc2::AllocAnyThread;
+    use objc2_foundation::{NSMutableAttributedString, NSRange};
     let (committed, tentative) = tail(committed.trim(), tentative.trim(), MAX_TEXT_CHARS);
     let sep = if committed.is_empty() || tentative.is_empty() {
         ""

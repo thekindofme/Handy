@@ -381,7 +381,6 @@ fn set_bool(app: &AppHandle, key: BoolKey, on: bool) -> Result<(), String> {
         }
         BoolKey::AutoSubmit => sc::change_auto_submit_setting(a, on),
         BoolKey::FillerWordRemoval => sc::change_filler_word_removal_enabled_setting(a, on),
-        BoolKey::UpdateChecks => sc::change_update_checks_setting(a, on),
         BoolKey::VoiceActivityDetection => sc::change_vad_enabled_setting(a, on),
     }
 }
@@ -441,6 +440,15 @@ fn download(app: &AppHandle, model_id: String) {
         if let Some(s) = state(&app) {
             s.lock().progress.remove(&model_id);
         }
+        // The rest takes snapshots, which `block_on`; that panics on an async
+        // runtime worker, so finish on a plain thread.
+        std::thread::spawn(move || finish_download(&app, model_id, result));
+    });
+}
+
+fn finish_download(app: &AppHandle, model_id: String, result: Result<(), String>) {
+    let app = app.clone();
+    {
         match result {
             Ok(()) => {
                 let settings = settings::get_settings(&app);
@@ -459,7 +467,7 @@ fn download(app: &AppHandle, model_id: String) {
             Err(e) => flash(&app, format!("Download failed: {e}")),
         }
         request_refresh(&app);
-    });
+    }
 }
 
 fn start_capture(app: &AppHandle) -> Result<(), String> {

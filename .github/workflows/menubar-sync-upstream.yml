@@ -1,0 +1,69 @@
+# Fork-only: once a week, merge the latest Handy (cjpais/handy) into the
+# menu bar branch and open a pull request with the result. A merge that
+# conflicts still gets a PR (with the conflict list) so nothing is missed.
+name: Sync upstream Handy
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    # Never runs in upstream's repository.
+    if: github.repository != 'cjpais/handy'
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: menubar-native
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+
+      - name: Merge upstream/main
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/cjpais/handy.git
+          git fetch upstream main
+          behind=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          [ "$behind" = 0 ] && exit 0
+          sync="sync/upstream-$(date +%Y-%m-%d)"
+          echo "sync=$sync" >> "$GITHUB_OUTPUT"
+          git checkout -b "$sync"
+          if git merge --no-edit upstream/main; then
+            echo "conflicts=" >> "$GITHUB_OUTPUT"
+          else
+            # Push upstream's tip as-is so the PR shows the conflicts to resolve.
+            files=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            echo "conflicts=$files" >> "$GITHUB_OUTPUT"
+            git merge --abort
+            git reset --hard upstream/main
+          fi
+          git push --force origin "$sync"
+
+      - name: Open pull request
+        if: steps.merge.outputs.behind != '0'
+        run: |
+          sync="${{ steps.merge.outputs.sync }}"
+          conflicts="${{ steps.merge.outputs.conflicts }}"
+          body="Merges ${{ steps.merge.outputs.behind }} new commit(s) from cjpais/handy.
+
+          Run \`scripts/menubar/sync-upstream.sh\` locally to test, or check the macOS build on this PR."
+          if [ -n "$conflicts" ]; then
+            body="$body
+
+          **Conflicts** in: $conflicts
+          Resolve locally with \`scripts/menubar/sync-upstream.sh\` (keep upstream's code, re-add the menubar hook)."
+          fi
+          gh pr list --head "$sync" --json number -q '.[0].number' | grep -q . ||
+            gh pr create --base "$BRANCH" --head "$sync" \
+              --title "Sync upstream Handy ($(date +%Y-%m-%d))" --body "$body"

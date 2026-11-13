@@ -1387,7 +1387,15 @@ fn os_languages() -> &'static [String] {
 pub fn update_checks_forced_disabled() -> bool {
     use std::sync::OnceLock;
     static IS_UPDATER_DISABLED: OnceLock<bool> = OnceLock::new();
-    *IS_UPDATER_DISABLED.get_or_init(|| utils::env_flag_enabled("HANDY_DISABLE_UPDATER"))
+    *IS_UPDATER_DISABLED.get_or_init(|| {
+        // Fork: the native menu bar UI has no updater (updates run in the
+        // WebView), and upstream's releases would replace this build.
+        #[cfg(target_os = "macos")]
+        if crate::menubar::enabled() {
+            return true;
+        }
+        utils::env_flag_enabled("HANDY_DISABLE_UPDATER")
+    })
 }
 
 /// Effective updater state: the user's stored preference, overridden to `false`

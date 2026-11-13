@@ -296,6 +296,9 @@ fn initialize_core_logic(app_handle: &AppHandle) {
             .show_menu_on_left_click(false)
             .on_tray_icon_event(|tray, event| {
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+                if !matches!(event, TrayIconEvent::Move { .. }) {
+                    log::info!("Tray event: {event:?}");
+                }
                 if let TrayIconEvent::Click {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
