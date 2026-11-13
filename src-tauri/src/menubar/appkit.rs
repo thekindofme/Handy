@@ -41,6 +41,8 @@ enum Slot {
     Switch(BoolKey),
     Popup(ChoiceKey, Vec<String>),
     Text(TextKey),
+    /// Filters the tab's rows in place; never reaches `perform`.
+    Search,
     Tabs,
 }
 
@@ -55,6 +57,7 @@ struct Tree {
     tabs: Retained<NSView>,
     scroll: Retained<NSScrollView>,
     progress: ProgressViews,
+    search: Option<SearchIndex>,
     slots: Vec<Slot>,
     /// Tags carry this so a control from a replaced tree can't fire.
     generation: isize,
@@ -67,6 +70,8 @@ struct Ui {
     root: Retained<NSView>,
     target: Retained<Target>,
     trees: HashMap<Tab, Tree>,
+    /// What's typed in a tab's search field; survives redraws while open.
+    query: String,
     /// The tab on screen.
     shown: Option<Tab>,
     next_generation: isize,
@@ -81,6 +86,8 @@ thread_local! {
 }
 
 const GEN_STRIDE: isize = 100_000;
+
+pub const REPO_URL: &str = "https://github.com/thekindofme/Handy";
 
 /// Whether the popover is open; read from any thread so closed-popover
 /// refreshes cost nothing.
@@ -142,6 +149,9 @@ define_class!(
 
 fn on_control(sender: &NSView) {
     let tag: isize = unsafe { msg_send![sender, tag] };
+    if filter_in_place(sender, tag) {
+        return;
+    }
     let action = UI.with(|cell| {
         let ui = cell.borrow();
         let ui = ui.as_ref()?;
@@ -160,6 +170,7 @@ fn on_control(sender: &NSView) {
                 let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
                 Action::SetChoice(*key, values.get(index as usize)?.clone())
             }
+            Slot::Search => return None,
             Slot::Text(key) => {
                 let value: Retained<NSString> = unsafe { msg_send![sender, stringValue] };
                 Action::SetText(*key, value.to_string())
@@ -174,6 +185,37 @@ fn on_control(sender: &NSView) {
     if let Some((app, action)) = action {
         super::perform(&app, action);
     }
+}
+
+/// A search field's change: filters its tab's rows without a redraw (so the
+/// field keeps focus). Returns false for any other control.
+fn filter_in_place(sender: &NSView, tag: isize) -> bool {
+    UI.with(|cell| {
+        let Ok(mut guard) = cell.try_borrow_mut() else {
+            return false;
+        };
+        let Some(ui) = guard.as_mut() else {
+            return false;
+        };
+        let Some(tab) = ui.shown else { return false };
+        let Some(tree) = ui.trees.get(&tab) else {
+            return false;
+        };
+        let is_search = tag / GEN_STRIDE == tree.generation
+            && matches!(
+                tree.slots.get((tag % GEN_STRIDE) as usize),
+                Some(Slot::Search)
+            );
+        if !is_search {
+            return false;
+        }
+        let value: Retained<NSString> = unsafe { msg_send![sender, stringValue] };
+        ui.query = value.to_string();
+        if let Some(index) = &tree.search {
+            index.apply(&ui.query);
+        }
+        true
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +261,7 @@ fn ensure_ui(app: &AppHandle, mtm: MainThreadMarker) {
             root,
             target,
             trees: HashMap::new(),
+            query: String::new(),
             shown: None,
             next_generation: 1,
         });
@@ -333,6 +376,7 @@ fn release_views() {
             }
             ui.trees.clear();
             ui.shown = None;
+            ui.query.clear();
         }
     });
 }
@@ -563,6 +607,40 @@ struct Builder<'a> {
     slots: Vec<Slot>,
     generation: isize,
     progress: ProgressViews,
+    search: Option<SearchIndex>,
+    /// The current search text, for a rebuilt search field.
+    query: String,
+}
+
+/// The rows a tab's search field filters, by group.
+struct SearchIndex {
+    groups: Vec<SearchGroup>,
+}
+
+struct SearchGroup {
+    view: Retained<NSView>,
+    /// (separator above the row, the row, lowercase text to match)
+    rows: Vec<(Option<Retained<NSView>>, Retained<NSView>, String)>,
+}
+
+impl SearchIndex {
+    /// Shows rows whose text contains every word of `query`; hides a group
+    /// with nothing left, and the separator above a group's first visible row.
+    fn apply(&self, query: &str) {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        for group in &self.groups {
+            let mut any = false;
+            for (sep, row, text) in &group.rows {
+                let show = words.iter().all(|w| text.contains(w.as_str()));
+                row.setHidden(!show);
+                if let Some(sep) = sep {
+                    sep.setHidden(!show || !any);
+                }
+                any |= show;
+            }
+            group.view.setHidden(!any);
+        }
+    }
 }
 
 /// Download bars and their percentage labels, by row id.
@@ -586,11 +664,34 @@ impl Builder<'_> {
 
     fn button(&mut self, spec: &ButtonSpec) -> Retained<NSView> {
         let b = NSButton::new(self.mtm);
-        b.setTitle(&ns(&spec.title));
-        b.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
-        b.setControlSize(NSControlSize::Small);
-        b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-        if spec.prominent {
+        if let Some(icon) = &spec.icon {
+            // Icon-only: borderless SF Symbol; the title is its tooltip and
+            // accessibility label.
+            let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &ns(icon),
+                Some(&ns(&spec.title)),
+            );
+            b.setImage(image.as_deref());
+            b.setTitle(&ns(""));
+            b.setBordered(false);
+            b.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageOnly);
+            b.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+            b.setToolTip(Some(&ns(&spec.title)));
+            activate(&[
+                b.widthAnchor().constraintEqualToConstant(22.0),
+                b.heightAnchor().constraintEqualToConstant(22.0),
+            ]);
+        } else {
+            b.setTitle(&ns(&spec.title));
+            b.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
+            b.setControlSize(NSControlSize::Small);
+            b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        }
+        let destructive = matches!(spec.action, Action::DeleteEntry(_) | Action::DeleteModel(_));
+        if spec.prominent && destructive {
+            // The confirming click of a two-step Delete.
+            b.setBezelColor(Some(&NSColor::systemRedColor()));
+        } else if spec.prominent {
             b.setBezelColor(Some(&NSColor::controlAccentColor()));
         }
         if matches!(spec.action, Action::DeleteEntry(_) | Action::DeleteModel(_)) {
@@ -612,6 +713,22 @@ impl Builder<'_> {
         let v: Retained<NSView> = upcast(&*b);
         self.wire(&v, Slot::Fixed(spec.action.clone()));
         set_identifier(&v, &spec.id);
+        set_label(&v, &spec.title);
+        v
+    }
+
+    fn search_field(&mut self, id: &str, placeholder: &str, query: &str) -> Retained<NSView> {
+        let f = objc2_app_kit::NSSearchField::new(self.mtm);
+        f.setPlaceholderString(Some(&ns(placeholder)));
+        f.setStringValue(&ns(query));
+        f.setSendsSearchStringImmediately(true);
+        f.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        no_autoresize(&f);
+        let v: Retained<NSView> = upcast(&*f);
+        self.wire(&v, Slot::Search);
+        set_identifier(&v, &format!("{id}.field"));
+        set_label(&v, placeholder);
+        self.search = Some(SearchIndex { groups: Vec::new() });
         v
     }
 
@@ -624,6 +741,8 @@ impl Builder<'_> {
         placeholder: &str,
         secure: bool,
         lines: u16,
+        wide: bool,
+        monospace: bool,
     ) -> Retained<NSView> {
         let mtm = self.mtm;
         let field: Retained<NSTextField> = if secure {
@@ -637,7 +756,12 @@ impl Builder<'_> {
         field.setEditable(true);
         field.setSelectable(true);
         field.setBezeled(true);
-        field.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        let font = if monospace {
+            NSFont::monospacedSystemFontOfSize_weight(11.5, 0.0)
+        } else {
+            NSFont::systemFontOfSize(12.0)
+        };
+        field.setFont(Some(&font));
         no_autoresize(&field);
         unsafe {
             let cell: *mut AnyObject = msg_send![&*field, cell];
@@ -659,7 +783,9 @@ impl Builder<'_> {
         } else {
             field.setBezelStyle(objc2_app_kit::NSTextFieldBezelStyle::RoundedBezel);
             field.setUsesSingleLineMode(true);
-            activate(&[field.widthAnchor().constraintEqualToConstant(200.0)]);
+            if !wide {
+                activate(&[field.widthAnchor().constraintEqualToConstant(200.0)]);
+            }
         }
         let v: Retained<NSView> = upcast(&*field);
         self.wire(&v, Slot::Text(key));
@@ -672,12 +798,18 @@ impl Builder<'_> {
         let mtm = self.mtm;
         let view: Retained<NSView> = match &row.control {
             Control::None => return None,
+            Control::Search { placeholder } => {
+                let query = self.query.clone();
+                self.search_field(&row.id, placeholder, &query)
+            }
             Control::Text {
                 key,
                 value,
                 placeholder,
                 secure,
                 lines,
+                wide,
+                monospace,
             } => self.text_field(
                 &row.id,
                 &row.title,
@@ -686,6 +818,8 @@ impl Builder<'_> {
                 placeholder,
                 *secure,
                 *lines,
+                *wide,
+                *monospace,
             ),
             Control::Switch { key, on } => {
                 let s = NSSwitch::new(mtm);
@@ -777,6 +911,16 @@ impl Builder<'_> {
     fn row(&mut self, row: &Row) -> Retained<NSView> {
         let mtm = self.mtm;
         let title = label(mtm, &row.title, 13.0, false, false);
+        if row.wrap {
+            title.setMaximumNumberOfLines(2);
+            title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            unsafe {
+                let cell: *mut AnyObject = msg_send![&*title, cell];
+                let _: () = msg_send![cell, setWraps: true];
+                let _: () = msg_send![cell, setTruncatesLastVisibleLine: true];
+            }
+            title.setPreferredMaxLayoutWidth(WIDTH - 2.0 * PAD - 90.0);
+        }
         let mut text: Vec<Retained<NSView>> = vec![upcast(&*title)];
         if let Some(detail) = &row.detail {
             let d = label(mtm, detail, 11.0, false, true);
@@ -793,7 +937,11 @@ impl Builder<'_> {
             objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
         );
         // A multi-line field takes the full width under its title.
-        let tall = matches!(row.control, Control::Text { lines, .. } if lines > 1);
+        let tall = match &row.control {
+            Control::Text { lines, wide, .. } => *lines > 1 || *wide,
+            Control::Search { .. } => true,
+            _ => false,
+        };
         let mut parts: Vec<Retained<NSView>> = vec![upcast(&*texts)];
         if let Some(c) = self.control(row) {
             parts.push(c);
@@ -815,15 +963,26 @@ impl Builder<'_> {
 
     fn group(&mut self, title: Option<&str>, rows: &[Row]) -> Retained<NSView> {
         let mtm = self.mtm;
+        // Groups after a search field are what it filters.
+        let searchable = self.search.is_some();
+        let mut indexed = Vec::new();
         let mut items: Vec<Retained<NSView>> = Vec::new();
         for (i, r) in rows.iter().enumerate() {
+            let mut sep_view = None;
             if i > 0 {
                 let sep = NSBox::new(mtm);
                 sep.setBoxType(NSBoxType::Separator);
                 no_autoresize(&sep);
-                items.push(upcast(&*sep));
+                let sep: Retained<NSView> = upcast(&*sep);
+                sep_view = Some(sep.clone());
+                items.push(sep);
             }
-            items.push(self.row(r));
+            let view = self.row(r);
+            if searchable {
+                let text = format!("{} {}", r.title, r.detail.clone().unwrap_or_default());
+                indexed.push((sep_view, view.clone(), text.to_lowercase()));
+            }
+            items.push(view);
         }
         let body = column(mtm, 0.0, 0.0, &items);
         let card = NSBox::new(mtm);
@@ -839,14 +998,32 @@ impl Builder<'_> {
         // NSBox doesn't size an Auto Layout content view by itself.
         pin_all(&body, &card);
         let card: Retained<NSView> = upcast(&*card);
-        match title {
+        let view = match title {
             Some(t) => {
-                let heading = label(mtm, &t.to_uppercase(), 10.5, true, true);
+                // Sentence case, semibold, secondary: today's macOS headings.
+                let heading = label(mtm, t, 12.0, true, true);
+                heading.setFont(Some(&NSFont::systemFontOfSize_weight(12.0, 0.3)));
                 let heading: Retained<NSView> = upcast(&*heading);
-                upcast(&*column(mtm, 4.0, 0.0, &[heading, card]))
+                let inset = stack(mtm, false, 0.0, &[heading]);
+                inset.setEdgeInsets(NSEdgeInsets {
+                    top: 0.0,
+                    left: 10.0,
+                    bottom: 0.0,
+                    right: 0.0,
+                });
+                upcast(&*column(mtm, 5.0, 0.0, &[upcast(&*inset), card]))
             }
             None => card,
+        };
+        if searchable {
+            if let Some(index) = self.search.as_mut() {
+                index.groups.push(SearchGroup {
+                    view: view.clone(),
+                    rows: indexed,
+                });
+            }
         }
+        view
     }
 
     fn block(&mut self, block: &Block) -> Retained<NSView> {
@@ -881,7 +1058,7 @@ impl Builder<'_> {
             Phase::Idle if screen.header.buttons.is_empty() => {
                 ("exclamationmark.circle.fill", NSColor::systemOrangeColor())
             }
-            Phase::Idle => ("hand.raised.fill", NSColor::labelColor()),
+            Phase::Idle => ("mic", NSColor::labelColor()),
         };
         let icon = symbol(mtm, icon, Some(tint), 26.0);
         let title = label(mtm, &screen.header.title, 14.0, true, false);
@@ -987,7 +1164,7 @@ fn prepare(app: &AppHandle, mtm: MainThreadMarker, tab: Tab, show: bool) {
             };
             let generation = ui.next_generation;
             ui.next_generation += 1;
-            let tree = build_tree(mtm, &ui.target, screen, generation);
+            let tree = build_tree(mtm, &ui.target, screen, generation, &ui.query);
             let on_screen = ui.shown == Some(tab);
             ui.trees.insert(tab, tree);
             if on_screen {
@@ -1049,13 +1226,21 @@ fn swap_in(ui: &mut Ui, tab: Tab) {
     }
 }
 
-fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation: isize) -> Tree {
+fn build_tree(
+    mtm: MainThreadMarker,
+    target: &Target,
+    screen: Screen,
+    generation: isize,
+    query: &str,
+) -> Tree {
     let mut b = Builder {
         mtm,
         target,
         slots: Vec::new(),
         generation,
         progress: HashMap::new(),
+        search: None,
+        query: query.to_string(),
     };
 
     let header = b.header(&screen);
@@ -1070,20 +1255,40 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
     });
     let footer_label = label(mtm, &screen.footer, 11.0, false, true);
     set_identifier(&footer_label, "footer.version");
+    let star = b.button(&ButtonSpec {
+        id: "footer.star".into(),
+        title: "Star Handy Bar on GitHub".into(),
+        action: Action::OpenUrl(REPO_URL.into()),
+        prominent: false,
+        icon: Some("star".into()),
+    });
     let quit = b.button(&ButtonSpec {
         id: "footer.quit".into(),
-        title: "Quit Handy Bar".into(),
+        title: "Quit".into(),
         action: Action::Quit,
         prominent: false,
+        icon: None,
     });
+    if let Some(q) = quit.downcast_ref::<NSButton>() {
+        // Secondary chrome: borderless, with its shortcut in the tooltip.
+        q.setBordered(false);
+        q.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        q.setToolTip(Some(&ns("Quit Handy Bar (⌘Q)")));
+    }
     let footer = stack(
         mtm,
         false,
         8.0,
-        &[upcast(&*footer_label), spacer(mtm), quit],
+        &[upcast(&*footer_label), spacer(mtm), star, quit],
     );
     let slots = std::mem::take(&mut b.slots);
     let progress = std::mem::take(&mut b.progress);
+    let search = b.search.take();
+    if let Some(index) = &search {
+        if !query.is_empty() {
+            index.apply(query);
+        }
+    }
 
     // Scrollable middle: a flipped document view holding the blocks.
     let doc: Retained<FlippedView> =
@@ -1094,6 +1299,9 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
     let scroll = NSScrollView::new(mtm);
     scroll.setHasVerticalScroller(true);
     scroll.setAutohidesScrollers(true);
+    // Overlay scrollers: content width never depends on a mouse being
+    // attached or "Show scroll bars" being set to Always.
+    scroll.setScrollerStyle(objc2_app_kit::NSScrollerStyle::Overlay);
     scroll.setDrawsBackground(false);
     no_autoresize(&scroll);
     scroll.setDocumentView(Some(&doc));
@@ -1118,17 +1326,16 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
         .constraintEqualToConstant(scroll_height)]);
 
     let scroll_view: Retained<NSView> = upcast(&*scroll.clone());
-    let outer = column(
-        mtm,
-        10.0,
-        0.0,
-        &[
-            header.clone(),
-            tabs.clone(),
-            scroll_view,
-            upcast(&*footer.clone()),
-        ],
-    );
+    let mut parts = vec![header.clone(), tabs.clone(), scroll_view];
+    if content_height > MAX_SCROLL {
+        // Content scrolls under the footer: a hairline marks the edge.
+        let sep = NSBox::new(mtm);
+        sep.setBoxType(NSBoxType::Separator);
+        no_autoresize(&sep);
+        parts.push(upcast(&*sep));
+    }
+    parts.push(upcast(&*footer.clone()));
+    let outer = column(mtm, 10.0, 0.0, &parts);
     // Header, tabs and footer get side padding; the scroll area runs edge
     // to edge so its scroller sits at the popover's edge.
     outer.setEdgeInsets(NSEdgeInsets {
@@ -1149,6 +1356,7 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
         outer,
         tabs,
         progress,
+        search,
         scroll,
         slots,
         generation,

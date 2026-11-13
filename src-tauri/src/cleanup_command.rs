@@ -38,19 +38,23 @@ pub struct CommandSettings {
     pub timeout_secs: u64,
     /// Start the command at hotkey press so it's ready when you stop.
     pub prewarm: bool,
+    /// Tell the model which app and window you're dictating into.
+    pub app_hints: bool,
+    /// Also read the front window's text (Apple Vision, on device).
+    pub screen_text: bool,
 }
 
 /// Ready-made commands: (id, label, command, time limit in seconds).
 pub const PRESETS: [(&str, &str, &str, u64); 2] = [
     (
         "claude_haiku",
-        "Claude Code (Haiku)",
+        "Claude Code (fastest)",
         "claude -p --model haiku",
         15,
     ),
     (
         "codex",
-        "Codex",
+        "Codex (slower)",
         "codex exec --skip-git-repo-check --ephemeral -c model_reasoning_effort=low -",
         30,
     ),
@@ -71,6 +75,8 @@ impl Default for CommandSettings {
             command: "claude -p --model haiku".to_string(),
             timeout_secs: 15,
             prewarm: true,
+            app_hints: true,
+            screen_text: false,
         }
     }
 }
@@ -176,6 +182,13 @@ fn kill(mut warm: Warm) {
 /// command now so it's loaded by the time the transcript is ready.
 pub fn prewarm(app: &AppHandle) {
     let settings = load(app);
+    // Context is read now, while the dictation target is still in front,
+    // for either kind of cleanup.
+    crate::cleanup_context::start(
+        settings.app_hints,
+        settings.screen_text,
+        crate::settings::get_settings(app).custom_words,
+    );
     if !settings.enabled || !settings.prewarm || settings.command.trim().is_empty() {
         return;
     }
@@ -230,7 +243,8 @@ pub async fn run_if_selected(app: &AppHandle, transcript: &str) -> Option<Comman
     if transcript.trim().is_empty() {
         return None; // Handy skips cleanup for an empty transcript
     }
-    let input = build_input(&selected_prompt(app), transcript);
+    let context = crate::cleanup_context::take().prompt_block();
+    let input = build_input(&selected_prompt(app), transcript, context.as_deref());
     let transcript = transcript.to_string();
     let outcome =
         tauri::async_runtime::spawn_blocking(move || run_blocking(&settings, &input, &transcript))
@@ -357,13 +371,33 @@ fn selected_prompt(app: &AppHandle) -> String {
 
 /// The text sent on stdin: the prompt with the transcript in place of
 /// `${output}`, or appended in tags when the prompt doesn't say where.
-pub fn build_input(prompt: &str, transcript: &str) -> String {
+pub fn build_input(prompt: &str, transcript: &str, context: Option<&str>) -> String {
     let instructions = "\n\nReply with only the cleaned text: no preamble, no quotes.";
+    let context = context.unwrap_or("");
     if prompt.contains("${output}") {
-        format!("{}{instructions}", prompt.replace("${output}", transcript))
+        format!(
+            "{}{context}{instructions}",
+            prompt.replace("${output}", transcript)
+        )
     } else {
-        format!("{prompt}\n\n<transcript>\n{transcript}\n</transcript>{instructions}")
+        format!("{prompt}\n\n<transcript>\n{transcript}\n</transcript>{context}{instructions}")
     }
+}
+
+/// Handy's own providers: the same context, added to the selected prompt.
+pub fn with_context(settings: &crate::settings::AppSettings) -> crate::settings::AppSettings {
+    let mut settings = settings.clone();
+    if let Some(block) = crate::cleanup_context::take().prompt_block() {
+        let selected = settings.post_process_selected_prompt_id.clone();
+        if let Some(prompt) = settings
+            .post_process_prompts
+            .iter_mut()
+            .find(|p| Some(&p.id) == selected.as_ref())
+        {
+            prompt.prompt.push_str(&block);
+        }
+    }
+    settings
 }
 
 /// Strips what CLIs commonly wrap an answer in: a `<think>` block, a code
@@ -417,9 +451,14 @@ mod tests {
 
     #[test]
     fn transcript_goes_where_the_prompt_says() {
-        let s = build_input("Fix: ${output}", "hello there");
+        let s = build_input("Fix: ${output}", "hello there", None);
         assert!(s.starts_with("Fix: hello there"));
-        let s = build_input("Fix this.", "hello there");
+        let s = build_input(
+            "Fix this.",
+            "hello there",
+            Some("\n\n<context>App: Mail</context>"),
+        );
+        assert!(s.contains("</transcript>\n\n<context>App: Mail</context>"));
         assert!(s.contains("<transcript>\nhello there\n</transcript>"));
     }
 
@@ -449,6 +488,7 @@ mod tests {
             command: "tr a-z A-Z".into(),
             timeout_secs: 5,
             prewarm: false,
+            ..Default::default()
         };
         match run_blocking(&settings, "hello there friend", "hello there friend") {
             CommandOutcome::Done(t) => assert_eq!(t, "HELLO THERE FRIEND"),
@@ -463,6 +503,7 @@ mod tests {
             command: "echo 'Failed to authenticate: session expired'; exit 1".into(),
             timeout_secs: 5,
             prewarm: false,
+            ..Default::default()
         };
         match run_blocking(&s, "x", "x") {
             CommandOutcome::Failed(why) => {
@@ -479,6 +520,7 @@ mod tests {
             command: "sleep 5".into(),
             timeout_secs: 1,
             prewarm: false,
+            ..Default::default()
         };
         let started = Instant::now();
         assert!(matches!(

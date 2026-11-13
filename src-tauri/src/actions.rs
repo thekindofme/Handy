@@ -450,7 +450,13 @@ pub(crate) async fn process_transcription_output(
                 warn!("Cleanup command failed: {why}");
                 PostProcessOutcome::Failed
             }
-            None => post_process_transcription(&settings, &final_text).await,
+            None => {
+                post_process_transcription(
+                    &crate::cleanup_command::with_context(&settings),
+                    &final_text,
+                )
+                .await
+            }
         };
         let outcome = match raw {
             PostProcessOutcome::Done(text) => non_blank_post_processed_text(text)

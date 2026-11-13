@@ -61,7 +61,15 @@ struct Inner {
     microphones: Vec<String>,
     outputs: Vec<String>,
     last_progress_redraw: Option<Instant>,
+    /// Models tab view options (not settings: they reset each launch).
+    model_filter: Option<String>,
+    model_sort: Option<String>,
+    /// A Delete clicked once, and when; a second click within
+    /// `CONFIRM_FOR` deletes.
+    confirm: Option<(String, Instant)>,
 }
+
+const CONFIRM_FOR: Duration = Duration::from_secs(4);
 
 /// Tauri-managed state shared between the main thread and event listeners.
 #[derive(Default)]
@@ -309,6 +317,24 @@ pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
         None => Default::default(),
     };
 
+    let view_state = state(app)
+        .map(|s| {
+            let inner = s.lock();
+            (
+                inner.model_filter.clone().unwrap_or_else(|| "all".into()),
+                inner
+                    .model_sort
+                    .clone()
+                    .unwrap_or_else(|| "recommended".into()),
+                inner
+                    .confirm
+                    .as_ref()
+                    .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
+                    .map(|(k, _)| k.clone()),
+            )
+        })
+        .unwrap_or_else(|| ("all".into(), "recommended".into(), None));
+
     Snapshot {
         phase: phase(app),
         settings,
@@ -329,6 +355,10 @@ pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
         command: crate::cleanup_command::load(app),
         secure_input: crate::secure_input::tray_warning_active(app),
         command_error: crate::cleanup_command::last_error(),
+        model_filter: view_state.0,
+        model_sort: view_state.1,
+        confirm_delete: view_state.2,
+        screen_recording: crate::cleanup_context::screen_recording_allowed(),
         model_loaded: app
             .try_state::<Arc<crate::managers::transcription::TranscriptionManager>>()
             .is_some_and(|tm| tm.is_model_loaded()),
@@ -458,6 +488,25 @@ fn set_bool(app: &AppHandle, key: BoolKey, on: bool) -> Result<(), String> {
             update_command(app, |c| c.prewarm = on);
             Ok(())
         }
+        BoolKey::AppHints => {
+            update_command(app, |c| c.app_hints = on);
+            Ok(())
+        }
+        BoolKey::ScreenText => {
+            update_command(app, |c| c.screen_text = on);
+            if on && !crate::cleanup_context::screen_recording_allowed() {
+                request_screen_recording();
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Shows the system prompt the first time; after that macOS only lets the
+/// user change it in System Settings, so open that pane too.
+fn request_screen_recording() {
+    if !crate::cleanup_context::request_screen_recording() {
+        let _ = open_privacy_pane("Privacy_ScreenCapture");
     }
 }
 
@@ -575,6 +624,17 @@ fn set_choice(app: &AppHandle, key: ChoiceKey, value: String) -> Result<(), Stri
             Ok(())
         }
         ChoiceKey::Prompt => sc::set_post_process_selected_prompt(a, value),
+        ChoiceKey::ModelFilter | ChoiceKey::ModelSort => {
+            if let Some(s) = state(app) {
+                let mut inner = s.lock();
+                if key == ChoiceKey::ModelFilter {
+                    inner.model_filter = Some(value);
+                } else {
+                    inner.model_sort = Some(value);
+                }
+            }
+            Ok(())
+        }
         ChoiceKey::UnloadTimeout => {
             crate::commands::transcription::set_model_unload_timeout(a, parse(&value)?);
             Ok(())
@@ -881,6 +941,31 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
             crate::shortcut::reset_binding(app.clone(), binding_id).map(|_| ())
         }
         Action::SetText(key, value) => set_text(app, key, value),
+        Action::ConfirmDelete(key) => {
+            if let Some(s) = state(app) {
+                s.lock().confirm = Some((key, Instant::now()));
+            }
+            // Put the plain Delete back if the second click doesn't come.
+            let app2 = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(CONFIRM_FOR);
+                request_refresh(&app2);
+            });
+            Ok(())
+        }
+        Action::OpenUrl(url) => {
+            // Only the app's own links reach here (see view.rs).
+            std::process::Command::new("/usr/bin/open")
+                .arg(&url)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        Action::RequestScreenRecording => {
+            request_screen_recording();
+            watch_permissions(app);
+            Ok(())
+        }
         Action::UnloadModel => {
             let tm = app.state::<Arc<crate::managers::transcription::TranscriptionManager>>();
             if tm.is_model_loaded() {

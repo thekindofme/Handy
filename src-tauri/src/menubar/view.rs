@@ -10,7 +10,7 @@ use crate::managers::history::HistoryEntry;
 use crate::managers::model::ModelInfo;
 use crate::settings::{
     AppSettings, AutoSubmitKey, ClipboardHandling, ModelUnloadTimeout, OverlayStyle, PasteMethod,
-    RecordingRetentionPeriod, ShortcutActivation, SoundTheme,
+    RecordingRetentionPeriod, SoundTheme,
 };
 use std::collections::HashMap;
 
@@ -77,6 +77,8 @@ pub enum BoolKey {
     VoiceActivityDetection,
     PostProcess,
     CommandPrewarm,
+    AppHints,
+    ScreenText,
 }
 
 impl BoolKey {
@@ -84,6 +86,8 @@ impl BoolKey {
     pub fn value(self, s: &Snapshot) -> bool {
         match self {
             BoolKey::CommandPrewarm => s.command.prewarm,
+            BoolKey::AppHints => s.command.app_hints,
+            BoolKey::ScreenText => s.command.screen_text,
             _ => self.get(&s.settings),
         }
     }
@@ -91,7 +95,8 @@ impl BoolKey {
     pub fn get(self, s: &AppSettings) -> bool {
         match self {
             BoolKey::PostProcess => s.post_process_enabled,
-            BoolKey::CommandPrewarm => false, // not an upstream setting; see `value`
+            // Not upstream settings; see `value`.
+            BoolKey::CommandPrewarm | BoolKey::AppHints | BoolKey::ScreenText => false,
             BoolKey::AudioFeedback => s.audio_feedback,
             BoolKey::Autostart => s.autostart_enabled,
             BoolKey::TranslateToEnglish => s.translate_to_english,
@@ -118,6 +123,8 @@ impl BoolKey {
             BoolKey::VoiceActivityDetection => "vad",
             BoolKey::PostProcess => "post_process",
             BoolKey::CommandPrewarm => "command_prewarm",
+            BoolKey::AppHints => "app_hints",
+            BoolKey::ScreenText => "screen_text",
         }
     }
 }
@@ -145,6 +152,8 @@ pub enum ChoiceKey {
     CommandTimeout,
     CommandPreset,
     Prompt,
+    ModelFilter,
+    ModelSort,
 }
 
 /// Settings typed into text fields.
@@ -178,6 +187,8 @@ impl ChoiceKey {
             ChoiceKey::CleanupEngine => "cleanup_engine",
             ChoiceKey::CommandTimeout => "command_timeout",
             ChoiceKey::CommandPreset => "command_preset",
+            ChoiceKey::ModelFilter => "model_filter",
+            ChoiceKey::ModelSort => "model_sort",
             ChoiceKey::Prompt => "prompt",
         }
     }
@@ -205,6 +216,11 @@ pub enum Action {
     ResetShortcut(String),
     SetText(TextKey, String),
     UnloadModel,
+    RequestScreenRecording,
+    /// First click on a Delete: asks to click again ("entry:<id>",
+    /// "model:<id>").
+    ConfirmDelete(String),
+    OpenUrl(String),
     OpenRecordingsFolder,
     OpenLogs,
     Quit,
@@ -229,6 +245,9 @@ pub struct ButtonSpec {
     pub title: String,
     pub action: Action,
     pub prominent: bool,
+    /// An SF Symbol: drawn as a borderless icon button, with `title` as
+    /// its tooltip and accessibility label.
+    pub icon: Option<String>,
 }
 
 fn button(id: impl Into<String>, title: &str, action: Action) -> ButtonSpec {
@@ -237,6 +256,7 @@ fn button(id: impl Into<String>, title: &str, action: Action) -> ButtonSpec {
         title: title.to_string(),
         action,
         prominent: false,
+        icon: None,
     }
 }
 
@@ -274,9 +294,16 @@ pub enum Control {
         value: String,
         placeholder: String,
         secure: bool,
-        /// 1 for a single line; more for a scrolling multi-line editor,
-        /// which takes the row's full width under its title.
+        /// 1 for a single line; more for a wrapping multi-line editor.
         lines: u16,
+        /// Full width under the row's title (always so when `lines` > 1).
+        wide: bool,
+        monospace: bool,
+    },
+    /// A search field that filters the groups after it as you type, in
+    /// place (drawn full width).
+    Search {
+        placeholder: String,
     },
 }
 
@@ -287,6 +314,8 @@ pub struct Row {
     pub title: String,
     pub detail: Option<String>,
     pub control: Control,
+    /// Let the title wrap to two lines instead of truncating.
+    pub wrap: bool,
 }
 
 impl Row {
@@ -296,7 +325,13 @@ impl Row {
             title: title.into(),
             detail: None,
             control,
+            wrap: false,
         }
+    }
+
+    fn wrap(mut self) -> Self {
+        self.wrap = true;
+        self
     }
 
     fn detail(mut self, detail: impl Into<String>) -> Self {
@@ -376,6 +411,13 @@ pub struct Snapshot {
     pub model_loaded: bool,
     /// Why the command-line cleanup last fell back to the raw text.
     pub command_error: Option<String>,
+    /// macOS lets Handy Bar capture other apps' windows.
+    pub screen_recording: bool,
+    /// Models tab: which models to show and in what order.
+    pub model_filter: String,
+    pub model_sort: String,
+    /// A Delete clicked once, waiting for the confirming click.
+    pub confirm_delete: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -629,21 +671,13 @@ fn transcribe_binding(s: &Snapshot) -> String {
         .unwrap_or_default()
 }
 
-fn activation_verb(activation: ShortcutActivation) -> &'static str {
-    match activation {
-        ShortcutActivation::Toggle => "press",
-        ShortcutActivation::PushToTalk => "hold",
-        ShortcutActivation::HoldOrToggle => "hold or tap",
-    }
-}
-
 fn header(s: &Snapshot) -> Header {
     let shortcut = pretty_shortcut(&transcribe_binding(s));
     match s.phase {
         Phase::Recording => Header {
             phase: s.phase,
             title: "Listening…".to_string(),
-            subtitle: format!("Press {shortcut} or Stop when you're done"),
+            subtitle: format!("Press {shortcut} to finish"),
             buttons: vec![
                 button("header.cancel", "Cancel", Action::CancelDictation),
                 prominent("header.stop", "Stop", Action::ToggleDictation),
@@ -669,14 +703,10 @@ fn header(s: &Snapshot) -> Header {
                     buttons: vec![],
                 }
             } else {
-                let model = active_model(s).map(|m| m.name.as_str()).unwrap_or("");
                 Header {
                     phase: s.phase,
                     title: "Ready".to_string(),
-                    subtitle: format!(
-                        "{model} · {} {shortcut}",
-                        activation_verb(s.settings.shortcut_activation)
-                    ),
+                    subtitle: format!("Press {shortcut} to dictate"),
                     buttons: vec![prominent(
                         "header.dictate",
                         "Dictate",
@@ -703,7 +733,7 @@ fn binding_row(s: &Snapshot, tab: &str, binding_id: &str, name: &str, title: &st
         .unwrap_or_default();
     if s.capturing_shortcut.as_deref() == Some(binding_id) {
         let held = if s.partial_shortcut.is_empty() {
-            "Type a shortcut…".to_string()
+            "Press keys…".to_string()
         } else {
             pretty_shortcut(&s.partial_shortcut)
         };
@@ -755,13 +785,13 @@ fn binding_row(s: &Snapshot, tab: &str, binding_id: &str, name: &str, title: &st
 fn activation_row(s: &Snapshot, tab: &str) -> Row {
     Row::new(
         format!("{tab}.activation"),
-        "Shortcut mode",
+        "Shortcut starts",
         popup(
             ChoiceKey::Activation,
             vec![
-                choice("hold_or_toggle", "Hold or tap"),
-                choice("push_to_talk", "Push to talk"),
-                choice("toggle", "Toggle"),
+                choice("toggle", "Press to start and stop"),
+                choice("push_to_talk", "Hold to talk"),
+                choice("hold_or_toggle", "Hold or press"),
             ],
             &serde_name(&s.settings.shortcut_activation),
         ),
@@ -828,32 +858,52 @@ fn switch_row(tab: &str, key: BoolKey, title: &str, s: &Snapshot) -> Row {
 
 fn history_row(entry: &HistoryEntry, tab: &str, s: &Snapshot, max: usize) -> Row {
     let text = entry_text(entry);
-    let title = if text.trim().is_empty() {
-        "(no speech)".to_string()
-    } else {
+    let has_text = !text.trim().is_empty();
+    let title = if has_text {
         one_line(text, max)
+    } else {
+        "No speech detected".to_string()
     };
     let mut detail = relative_time(entry.timestamp, s.now);
     if let Some(source) = &entry.source_name {
         detail = format!("{detail} · {source}");
     }
-    let mut buttons = vec![button(
-        format!("{tab}.entry.{}.copy", entry.id),
-        "Copy",
-        Action::CopyEntry(entry.id),
-    )];
+    let mut buttons = Vec::new();
+    if has_text {
+        buttons.push(ButtonSpec {
+            icon: Some("doc.on.doc".to_string()),
+            ..button(
+                format!("{tab}.entry.{}.copy", entry.id),
+                "Copy",
+                Action::CopyEntry(entry.id),
+            )
+        });
+    }
     if tab == "history" {
-        buttons.push(button(
-            format!("{tab}.entry.{}.delete", entry.id),
-            "Delete",
-            Action::DeleteEntry(entry.id),
-        ));
+        let key = format!("entry:{}", entry.id);
+        if s.confirm_delete.as_deref() == Some(key.as_str()) {
+            buttons.push(prominent(
+                format!("{tab}.entry.{}.delete.confirm", entry.id),
+                "Delete?",
+                Action::DeleteEntry(entry.id),
+            ));
+        } else {
+            buttons.push(ButtonSpec {
+                icon: Some("trash".to_string()),
+                ..button(
+                    format!("{tab}.entry.{}.delete", entry.id),
+                    "Delete",
+                    Action::ConfirmDelete(key),
+                )
+            });
+        }
     }
     Row::new(
         format!("{tab}.entry.{}", entry.id),
         title,
         Control::Buttons(buttons),
     )
+    .wrap()
     .detail(detail)
 }
 
@@ -884,14 +934,9 @@ fn home(s: &Snapshot) -> Vec<Block> {
     if let Some(row) = language_row(s, "home") {
         quick.push(row);
     }
-    quick.push(shortcut_row(s, "home"));
-    quick.push(activation_row(s, "home"));
-    quick.push(switch_row(
-        "home",
-        BoolKey::AudioFeedback,
-        "Sound effects",
-        s,
-    ));
+    if !setup_rows(s).is_empty() {
+        quick.push(shortcut_row(s, "home"));
+    }
     blocks.push(Block::Group {
         title: None,
         rows: quick,
@@ -900,7 +945,8 @@ fn home(s: &Snapshot) -> Vec<Block> {
     let recent: Vec<Row> = s
         .history
         .iter()
-        .take(3)
+        .filter(|e| !entry_text(e).trim().is_empty())
+        .take(5)
         .map(|e| history_row(e, "home", s, 70))
         .collect();
     if recent.is_empty() {
@@ -924,7 +970,7 @@ fn history(s: &Snapshot) -> Vec<Block> {
     }
     vec![
         Block::Group {
-            title: Some(format!("{} recent", s.history.len())),
+            title: Some("Recent".to_string()),
             rows: s
                 .history
                 .iter()
@@ -948,26 +994,32 @@ fn history(s: &Snapshot) -> Vec<Block> {
 
 fn model_row(s: &Snapshot, m: &ModelInfo) -> Row {
     let id = format!("models.{}", m.id);
-    let mut detail = vec![size_label(m.size_mb)];
-    if m.is_recommended {
-        detail.push("Recommended".to_string());
-    }
-    detail.push(format!(
-        "accuracy {:.0}% · speed {:.0}%",
+    let mut detail = format!(
+        "{} · Accuracy {:.0} · Speed {:.0}",
+        size_label(m.size_mb),
         m.accuracy_score * 100.0,
         m.speed_score * 100.0
-    ));
+    );
+    if m.supports_streaming {
+        detail.push_str(" · Live text");
+    }
     let control = if let Some(progress) = model_progress_control(s, m) {
         progress
     } else if m.is_downloaded && m.id == s.settings.selected_model {
         Control::Done("In use".to_string())
     } else if m.is_downloaded {
-        Control::Buttons(vec![
-            button(
-                format!("{id}.delete"),
-                "Delete",
+        let key = format!("model:{}", m.id);
+        let delete = if s.confirm_delete.as_deref() == Some(key.as_str()) {
+            prominent(
+                format!("{id}.delete.confirm"),
+                &format!("Delete {}?", size_label(m.size_mb)),
                 Action::DeleteModel(m.id.clone()),
-            ),
+            )
+        } else {
+            button(format!("{id}.delete"), "Delete", Action::ConfirmDelete(key))
+        };
+        Control::Buttons(vec![
+            delete,
             prominent(
                 format!("{id}.use"),
                 "Use",
@@ -981,34 +1033,82 @@ fn model_row(s: &Snapshot, m: &ModelInfo) -> Row {
             Action::DownloadModel(m.id.clone()),
         )])
     };
-    Row::new(id, m.name.clone(), control).detail(detail.join(" · "))
+    Row::new(id, m.name.clone(), control).detail(detail)
+}
+
+fn model_matches_filter(m: &ModelInfo, filter: &str) -> bool {
+    match filter {
+        "english" => m.supported_languages == ["en"],
+        "multilingual" => m.supported_languages.len() > 1,
+        "live" => m.supports_streaming,
+        "translate" => m.supports_translation,
+        _ => true,
+    }
 }
 
 fn models(s: &Snapshot) -> Vec<Block> {
     let mut installed: Vec<&ModelInfo> = s.models.iter().filter(|m| m.is_downloaded).collect();
-    let mut available: Vec<&ModelInfo> = s.models.iter().filter(|m| !m.is_downloaded).collect();
+    let mut available: Vec<&ModelInfo> = s
+        .models
+        .iter()
+        .filter(|m| !m.is_downloaded && model_matches_filter(m, &s.model_filter))
+        .collect();
     installed.sort_by(|a, b| a.name.cmp(&b.name));
-    available.sort_by(|a, b| {
-        b.is_recommended
-            .cmp(&a.is_recommended)
-            .then(a.size_mb.cmp(&b.size_mb))
-    });
-    let mut blocks = Vec::new();
-    if s.model_loaded {
-        blocks.push(Block::Group {
-            title: None,
-            rows: vec![Row::new(
-                "models.unload",
-                "Model is loaded",
-                Control::Buttons(vec![button(
-                    "models.unload.button",
-                    "Free memory",
-                    Action::UnloadModel,
-                )]),
-            )
-            .detail("It loads again on your next dictation")],
-        });
+    let by_score = |a: f32, b: f32| b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal);
+    match s.model_sort.as_str() {
+        "accuracy" => available.sort_by(|a, b| by_score(a.accuracy_score, b.accuracy_score)),
+        "speed" => available.sort_by(|a, b| by_score(a.speed_score, b.speed_score)),
+        "size" => available.sort_by(|a, b| a.size_mb.cmp(&b.size_mb)),
+        "name" => available.sort_by(|a, b| a.name.cmp(&b.name)),
+        _ => available.sort_by(|a, b| {
+            b.is_recommended
+                .cmp(&a.is_recommended)
+                .then(a.size_mb.cmp(&b.size_mb))
+        }),
     }
+
+    let mut blocks = vec![Block::Group {
+        title: None,
+        rows: vec![
+            Row::new(
+                "models.search",
+                "Search",
+                Control::Search {
+                    placeholder: "Search models".to_string(),
+                },
+            ),
+            Row::new(
+                "models.filter",
+                "Show",
+                popup(
+                    ChoiceKey::ModelFilter,
+                    vec![
+                        choice("all", "All models"),
+                        choice("english", "English only"),
+                        choice("multilingual", "Multilingual"),
+                        choice("live", "Live text"),
+                        choice("translate", "Translates to English"),
+                    ],
+                    &s.model_filter,
+                ),
+            ),
+            Row::new(
+                "models.sort",
+                "Sort by",
+                popup(
+                    ChoiceKey::ModelSort,
+                    vec![
+                        choice("recommended", "Recommended"),
+                        choice("accuracy", "Most accurate"),
+                        choice("speed", "Fastest"),
+                        choice("size", "Smallest"),
+                        choice("name", "Name"),
+                    ],
+                    &s.model_sort,
+                ),
+            ),
+        ],
+    }];
     if installed.is_empty() {
         blocks.push(Block::Note(
             "No models downloaded yet. Pick one below.".to_string(),
@@ -1019,7 +1119,38 @@ fn models(s: &Snapshot) -> Vec<Block> {
             rows: installed.into_iter().map(|m| model_row(s, m)).collect(),
         });
     }
-    if !available.is_empty() {
+    if s.model_loaded {
+        blocks.push(Block::Group {
+            title: None,
+            rows: vec![Row::new(
+                "models.unload",
+                "Loaded in memory",
+                Control::Buttons(vec![button(
+                    "models.unload.button",
+                    "Unload",
+                    Action::UnloadModel,
+                )]),
+            )],
+        });
+    }
+    if available.is_empty() {
+        if s.model_filter != "all" {
+            blocks.push(Block::Note(
+                "No models match. Try another filter.".to_string(),
+            ));
+        }
+    } else if s.model_sort == "recommended" && s.model_filter == "all" {
+        let (recommended, more): (Vec<&ModelInfo>, Vec<&ModelInfo>) =
+            available.into_iter().partition(|m| m.is_recommended);
+        for (title, list) in [("Recommended", recommended), ("More models", more)] {
+            if !list.is_empty() {
+                blocks.push(Block::Group {
+                    title: Some(title.to_string()),
+                    rows: list.into_iter().map(|m| model_row(s, m)).collect(),
+                });
+            }
+        }
+    } else {
         blocks.push(Block::Group {
             title: Some("Available".to_string()),
             rows: available.into_iter().map(|m| model_row(s, m)).collect(),
@@ -1069,16 +1200,28 @@ fn settings(s: &Snapshot) -> Vec<Block> {
             s,
         ));
     }
+    dictation.push(switch_row(
+        "settings",
+        BoolKey::VoiceActivityDetection,
+        "Skip silence",
+        s,
+    ));
+    dictation.push(switch_row(
+        "settings",
+        BoolKey::FillerWordRemoval,
+        "Remove filler words",
+        s,
+    ));
 
     let output_current = st.selected_output_device.as_deref();
-    let mut sound = vec![
+    let mut audio = vec![
         microphone_row(s, "settings"),
         switch_row("settings", BoolKey::AudioFeedback, "Sound effects", s),
     ];
     if st.audio_feedback {
-        sound.push(Row::new(
+        audio.push(Row::new(
             "settings.sound_theme",
-            "Sound",
+            "Sound style",
             popup(
                 ChoiceKey::SoundTheme,
                 vec![choice("marimba", "Marimba"), choice("pop", "Pop")]
@@ -1090,7 +1233,7 @@ fn settings(s: &Snapshot) -> Vec<Block> {
                 &serde_name(&st.sound_theme),
             ),
         ));
-        sound.push(Row::new(
+        audio.push(Row::new(
             "settings.output_device",
             "Play sounds on",
             popup(
@@ -1100,35 +1243,29 @@ fn settings(s: &Snapshot) -> Vec<Block> {
             ),
         ));
     }
-    sound.push(switch_row(
+    audio.push(switch_row(
         "settings",
         BoolKey::MuteWhileRecording,
         "Mute other audio while recording",
         s,
     ));
-    sound.push(switch_row(
+    audio.push(switch_row(
         "settings",
         BoolKey::AlwaysOnMicrophone,
         "Keep microphone open",
         s,
     ));
-    sound.push(switch_row(
-        "settings",
-        BoolKey::VoiceActivityDetection,
-        "Trim silence",
-        s,
-    ));
 
-    let mut output = vec![
+    let mut pasting = vec![
         Row::new(
             "settings.paste_method",
-            "Paste with",
+            "Insert text by",
             popup(
                 ChoiceKey::PasteMethod,
                 vec![
-                    choice("ctrl_v", "⌘V (clipboard)"),
+                    choice("ctrl_v", "Pasting (⌘V)"),
                     choice("direct", "Typing"),
-                    choice("none", "Don't paste"),
+                    choice("none", "Don't insert"),
                 ]
                 .into_iter()
                 .chain(
@@ -1136,7 +1273,7 @@ fn settings(s: &Snapshot) -> Vec<Block> {
                         st.paste_method,
                         PasteMethod::CtrlV | PasteMethod::Direct | PasteMethod::None
                     ))
-                    .then(|| choice(&serde_name(&st.paste_method), "Custom")),
+                    .then(|| choice(&serde_name(&st.paste_method), "Other method")),
                 )
                 .collect(),
                 &serde_name(&st.paste_method),
@@ -1144,14 +1281,17 @@ fn settings(s: &Snapshot) -> Vec<Block> {
         ),
         Row::new(
             "settings.clipboard_handling",
-            "Clipboard",
+            "After pasting",
             popup(
                 ChoiceKey::ClipboardHandling,
                 vec![
-                    choice(&serde_name(&ClipboardHandling::DontModify), "Restore it"),
+                    choice(
+                        &serde_name(&ClipboardHandling::DontModify),
+                        "Restore clipboard",
+                    ),
                     choice(
                         &serde_name(&ClipboardHandling::CopyToClipboard),
-                        "Keep the transcript",
+                        "Keep transcript on clipboard",
                     ),
                 ],
                 &serde_name(&st.clipboard_handling),
@@ -1165,21 +1305,15 @@ fn settings(s: &Snapshot) -> Vec<Block> {
         ),
         switch_row(
             "settings",
-            BoolKey::FillerWordRemoval,
-            "Remove filler words",
-            s,
-        ),
-        switch_row(
-            "settings",
             BoolKey::AutoSubmit,
             "Press a key after pasting",
             s,
         ),
     ];
     if st.auto_submit {
-        output.push(Row::new(
+        pasting.push(Row::new(
             "settings.auto_submit_key",
-            "Key",
+            "Key to press",
             popup(
                 ChoiceKey::AutoSubmitKey,
                 vec![
@@ -1192,24 +1326,7 @@ fn settings(s: &Snapshot) -> Vec<Block> {
         ));
     }
 
-    let system = vec![
-        switch_row("settings", BoolKey::Autostart, "Open at login", s),
-        Row::new(
-            "settings.unload_timeout",
-            "Free model memory",
-            popup(
-                ChoiceKey::UnloadTimeout,
-                vec![
-                    choice(&serde_name(&ModelUnloadTimeout::Immediately), "Right away"),
-                    choice(&serde_name(&ModelUnloadTimeout::Min2), "After 2 min"),
-                    choice(&serde_name(&ModelUnloadTimeout::Min5), "After 5 min"),
-                    choice(&serde_name(&ModelUnloadTimeout::Min15), "After 15 min"),
-                    choice(&serde_name(&ModelUnloadTimeout::Hour1), "After 1 hour"),
-                    choice(&serde_name(&ModelUnloadTimeout::Never), "Never"),
-                ],
-                &serde_name(&st.model_unload_timeout),
-            ),
-        ),
+    let history = vec![
         Row::new(
             "settings.history_limit",
             "Keep transcripts",
@@ -1248,6 +1365,26 @@ fn settings(s: &Snapshot) -> Vec<Block> {
                 &serde_name(&st.recording_retention_period),
             ),
         ),
+    ];
+
+    let general = vec![
+        switch_row("settings", BoolKey::Autostart, "Open at login", s),
+        Row::new(
+            "settings.unload_timeout",
+            "Free model memory",
+            popup(
+                ChoiceKey::UnloadTimeout,
+                vec![
+                    choice(&serde_name(&ModelUnloadTimeout::Immediately), "Right away"),
+                    choice(&serde_name(&ModelUnloadTimeout::Min2), "After 2 min"),
+                    choice(&serde_name(&ModelUnloadTimeout::Min5), "After 5 min"),
+                    choice(&serde_name(&ModelUnloadTimeout::Min15), "After 15 min"),
+                    choice(&serde_name(&ModelUnloadTimeout::Hour1), "After 1 hour"),
+                    choice(&serde_name(&ModelUnloadTimeout::Never), "Never"),
+                ],
+                &serde_name(&st.model_unload_timeout),
+            ),
+        ),
         Row::new(
             "settings.logs",
             "Logs",
@@ -1259,23 +1396,50 @@ fn settings(s: &Snapshot) -> Vec<Block> {
         ),
     ];
 
+    let about = vec![
+        Row::new(
+            "settings.about",
+            "Handy Bar is open source",
+            Control::Buttons(vec![
+                ButtonSpec {
+                    icon: Some("star".to_string()),
+                    ..button(
+                        "settings.about.star",
+                        "Star on GitHub",
+                        Action::OpenUrl("https://github.com/thekindofme/Handy".to_string()),
+                    )
+                },
+                button(
+                    "settings.about.website",
+                    "Website",
+                    Action::OpenUrl("https://handybar.yasithfernando.com".to_string()),
+                ),
+            ]),
+        )
+        .detail("Unofficial fork of Handy · MIT"),
+        Row::new(
+            "settings.report",
+            "Report a problem",
+            Control::Buttons(vec![button(
+                "settings.report.issues",
+                "Open issues",
+                Action::OpenUrl("https://github.com/thekindofme/Handy/issues".to_string()),
+            )]),
+        ),
+    ];
+
+    // Microphone leads the page, so Audio comes first.
+    let group = |title: &str, rows: Vec<Row>| Block::Group {
+        title: Some(title.to_string()),
+        rows,
+    };
     vec![
-        Block::Group {
-            title: Some("Dictation".to_string()),
-            rows: dictation,
-        },
-        Block::Group {
-            title: Some("Sound".to_string()),
-            rows: sound,
-        },
-        Block::Group {
-            title: Some("Output".to_string()),
-            rows: output,
-        },
-        Block::Group {
-            title: Some("System".to_string()),
-            rows: system,
-        },
+        group("Audio", audio),
+        group("Dictation", dictation),
+        group("Pasting", pasting),
+        group("History", history),
+        group("General", general),
+        group("About", about),
     ]
 }
 
@@ -1338,6 +1502,8 @@ fn text(key: TextKey, value: &str, placeholder: &str) -> Control {
         placeholder: placeholder.to_string(),
         secure: false,
         lines: 1,
+        wide: false,
+        monospace: false,
     }
 }
 
@@ -1349,30 +1515,29 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut top = vec![
         switch_row("cleanup", BoolKey::PostProcess, "Clean up with AI", s)
-            .detail("Has its own shortcut"),
+            .detail("Uses a separate shortcut"),
     ];
     if st.post_process_enabled {
-        let mut row = binding_row(
+        top.push(binding_row(
             s,
             "cleanup",
             "transcribe_with_post_process",
             "shortcut",
             "Cleanup shortcut",
-        );
-        if s.accessibility_permission && s.capturing_shortcut.is_none() {
-            if let Some(main) = overlapping_binding(s, "transcribe_with_post_process") {
-                row = row.detail(format!(
-                    "Clashes with {}: pick another",
-                    pretty_shortcut(&main)
-                ));
-            }
-        }
-        top.push(row);
+        ));
     }
     blocks.push(Block::Group {
         title: None,
         rows: top,
     });
+    if st.post_process_enabled && s.accessibility_permission && s.capturing_shortcut.is_none() {
+        if let Some(main) = overlapping_binding(s, "transcribe_with_post_process") {
+            blocks.push(Block::Alert(format!(
+                "Cleanup shortcut overlaps {}, so both would start. Choose another.",
+                pretty_shortcut(&main)
+            )));
+        }
+    }
     if !st.post_process_enabled {
         blocks.push(Block::Note(
             "Turn this on to dictate with a second shortcut that sends your words to an AI model or a command-line tool, then pastes the cleaned-up text.".to_string(),
@@ -1408,15 +1573,26 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
             "Tool",
             popup(ChoiceKey::CommandPreset, presets, current),
         ));
-        run.push(Row::new(
-            "cleanup.command",
-            "Command",
-            text(
-                TextKey::Command,
-                &s.command.command,
-                "claude -p --model haiku",
-            ),
-        ));
+        if crate::cleanup_command::preset_of(&s.command.command).is_some() {
+            run.push(
+                Row::new("cleanup.command", "Command", Control::None)
+                    .detail(s.command.command.clone()),
+            );
+        } else {
+            run.push(Row::new(
+                "cleanup.command",
+                "Command",
+                Control::Text {
+                    key: TextKey::Command,
+                    value: s.command.command.clone(),
+                    placeholder: "claude -p --model haiku".to_string(),
+                    secure: false,
+                    lines: 1,
+                    wide: true,
+                    monospace: true,
+                },
+            ));
+        }
         run.push(Row::new(
             "cleanup.command_timeout",
             "Time limit",
@@ -1465,6 +1641,8 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
                     placeholder: "Paste your key".to_string(),
                     secure: true,
                     lines: 1,
+                    wide: false,
+                    monospace: false,
                 },
             ));
             let model = st
@@ -1490,9 +1668,35 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
     }
     if s.command.enabled {
         blocks.push(Block::Note(
-            "Your prompt and words go to the command on standard input, and what it prints is pasted. Claude Code (Haiku) is the fastest; Codex takes several seconds. Both use the subscription you're signed in with. If the command is slow, fails, or drops your words, your original text is pasted.".to_string(),
+            "Your original text is pasted if the tool is slow, fails, or drops your words."
+                .to_string(),
         ));
     }
+
+    let mut context = vec![
+        switch_row("cleanup", BoolKey::AppHints, "Include the app you're in", s)
+            .detail("App name and window title"),
+        switch_row("cleanup", BoolKey::ScreenText, "Include text on screen", s)
+            .detail("Read on your Mac; helps spell names right"),
+    ];
+    if s.command.screen_text && !s.screen_recording {
+        context.push(
+            Row::new(
+                "cleanup.screen_recording",
+                "Screen Recording",
+                Control::Buttons(vec![button(
+                    "cleanup.screen_recording.allow",
+                    "Allow…",
+                    Action::RequestScreenRecording,
+                )]),
+            )
+            .detail("Needed to read the screen"),
+        );
+    }
+    blocks.push(Block::Group {
+        title: Some("Context".to_string()),
+        rows: context,
+    });
 
     let selected = st
         .post_process_selected_prompt_id
@@ -1503,7 +1707,7 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
     if !st.post_process_prompts.is_empty() {
         prompt_rows.push(Row::new(
             "cleanup.prompt",
-            "Prompt",
+            "Preset",
             popup(
                 ChoiceKey::Prompt,
                 st.post_process_prompts
@@ -1525,6 +1729,8 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
                     .to_string(),
                 secure: false,
                 lines: 7,
+                wide: false,
+                monospace: true,
             },
         ));
     }
@@ -1582,7 +1788,7 @@ pub fn actions(screen: &Screen) -> Vec<Action> {
                     Control::Text { key, value, .. } => {
                         out.push(Action::SetText(*key, value.clone()))
                     }
-                    Control::Done(_) | Control::None => {}
+                    Control::Done(_) | Control::None | Control::Search { .. } => {}
                 }
             }
         }
@@ -1608,7 +1814,7 @@ pub fn rows(screen: &Screen) -> Vec<&Row> {
 mod tests {
     use super::*;
     use crate::managers::model::ModelSource;
-    use crate::settings::get_default_settings;
+    use crate::settings::{get_default_settings, ShortcutActivation};
 
     fn model(id: &str, downloaded: bool, recommended: bool) -> ModelInfo {
         ModelInfo {
@@ -1685,6 +1891,10 @@ mod tests {
             secure_input: false,
             model_loaded: false,
             command_error: None,
+            screen_recording: false,
+            model_filter: "all".into(),
+            model_sort: "recommended".into(),
+            confirm_delete: None,
         }
     }
 
@@ -1744,8 +1954,7 @@ mod tests {
     fn ready_header_offers_dictation_with_the_shortcut() {
         let screen = build(&ready(), Tab::Home);
         assert_eq!(screen.header.title, "Ready");
-        assert!(screen.header.subtitle.contains("Model a"));
-        assert!(screen.header.subtitle.contains("⌥ Space"));
+        assert_eq!(screen.header.subtitle, "Press ⌥ Space to dictate");
         assert_eq!(screen.header.buttons.len(), 1);
         assert_eq!(screen.header.buttons[0].action, Action::ToggleDictation);
         assert_eq!(screen.footer, "Handy Bar 0.10.0 · unofficial fork of Handy");
@@ -1757,6 +1966,7 @@ mod tests {
         s.phase = Phase::Recording;
         let h = build(&s, Tab::Home).header;
         assert_eq!(h.title, "Listening…");
+        assert_eq!(h.subtitle, "Press ⌥ Space to finish");
         let actions: Vec<_> = h.buttons.iter().map(|b| b.action.clone()).collect();
         assert_eq!(
             actions,
@@ -1840,14 +2050,11 @@ mod tests {
     #[test]
     fn home_has_quick_controls() {
         let screen = build(&ready(), Tab::Home);
-        for id in [
-            "home.microphone",
-            "home.language",
-            "home.shortcut",
-            "home.activation",
-            "home.audio_feedback",
-        ] {
+        for id in ["home.microphone", "home.language"] {
             assert!(has_row(&screen, id), "missing {id}");
+        }
+        for id in ["home.shortcut", "home.activation", "home.audio_feedback"] {
+            assert!(!has_row(&screen, id), "unexpected {id}");
         }
         assert!(screen
             .blocks
@@ -1855,7 +2062,7 @@ mod tests {
     }
 
     #[test]
-    fn home_lists_the_latest_three_transcripts() {
+    fn home_lists_the_latest_five_transcripts() {
         let mut s = ready();
         s.history = (1..=5)
             .rev()
@@ -1867,7 +2074,10 @@ mod tests {
             .filter(|r| r.id.starts_with("home.entry."))
             .map(|r| r.title.clone())
             .collect();
-        assert_eq!(latest, vec!["note 5", "note 4", "note 3"]);
+        assert_eq!(
+            latest,
+            vec!["note 5", "note 4", "note 3", "note 2", "note 1"]
+        );
         assert!(actions(&screen).contains(&Action::CopyEntry(5)));
         // Delete lives on the History tab only.
         assert!(!actions(&screen).contains(&Action::DeleteEntry(5)));
@@ -1883,10 +2093,145 @@ mod tests {
         let r = row(&screen, "history.entry.7");
         assert_eq!(r.title, "Polished words.");
         assert_eq!(r.detail.as_deref(), Some("2 min ago"));
-        assert_eq!(row(&screen, "history.entry.6").title, "(no speech)");
+        assert_eq!(row(&screen, "history.entry.6").title, "No speech detected");
+        assert!(r.wrap);
         let acts = actions(&screen);
-        assert!(acts.contains(&Action::DeleteEntry(7)));
+        assert!(acts.contains(&Action::ConfirmDelete("entry:7".into())));
+        assert!(!acts.contains(&Action::DeleteEntry(7)));
+        assert!(!acts.contains(&Action::CopyEntry(6)));
+        assert!(acts.contains(&Action::CopyEntry(7)));
+        assert!(acts.contains(&Action::ConfirmDelete("entry:6".into())));
         assert!(acts.contains(&Action::OpenRecordingsFolder));
+    }
+
+    #[test]
+    fn home_skips_entries_without_speech() {
+        let mut s = ready();
+        s.history = vec![entry(2, "  ", 0), entry(1, "hello", 0)];
+        let screen = build(&s, Tab::Home);
+        assert!(!has_row(&screen, "home.entry.2"));
+        assert!(has_row(&screen, "home.entry.1"));
+    }
+
+    #[test]
+    fn deleting_an_entry_needs_a_second_click() {
+        let mut s = ready();
+        s.history = vec![entry(7, "words", 0)];
+        s.confirm_delete = Some("entry:7".into());
+        let screen = build(&s, Tab::History);
+        match &row(&screen, "history.entry.7").control {
+            Control::Buttons(bs) => {
+                let del = bs.last().unwrap();
+                assert_eq!(del.id, "history.entry.7.delete.confirm");
+                assert_eq!(del.title, "Delete?");
+                assert_eq!(del.action, Action::DeleteEntry(7));
+                assert!(del.prominent && del.icon.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn deleting_a_model_needs_a_second_click() {
+        let mut s = ready();
+        s.models.push(model("c", true, false));
+        let acts = actions(&build(&s, Tab::Models));
+        assert!(acts.contains(&Action::ConfirmDelete("model:c".into())));
+        s.confirm_delete = Some("model:c".into());
+        let screen = build(&s, Tab::Models);
+        match &row(&screen, "models.c").control {
+            Control::Buttons(bs) => {
+                assert_eq!(bs[0].id, "models.c.delete.confirm");
+                assert_eq!(bs[0].title, "Delete 480 MB?");
+                assert_eq!(bs[0].action, Action::DeleteModel("c".into()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_rows_show_scores_and_live_text() {
+        let mut s = ready();
+        s.models[1].supports_streaming = true;
+        let screen = build(&s, Tab::Models);
+        assert_eq!(
+            row(&screen, "models.b").detail.as_deref(),
+            Some("480 MB · Accuracy 80 · Speed 90 · Live text")
+        );
+        assert_eq!(
+            row(&screen, "models.a").detail.as_deref(),
+            Some("480 MB · Accuracy 80 · Speed 90")
+        );
+    }
+
+    #[test]
+    fn models_can_be_filtered_and_sorted() {
+        let mut s = ready();
+        let mut c = model("c", false, false);
+        c.supported_languages = vec!["en".into()];
+        c.size_mb = 100;
+        c.accuracy_score = 0.95;
+        s.models.push(c);
+        s.model_filter = "english".into();
+        let screen = build(&s, Tab::Models);
+        assert!(has_row(&screen, "models.c"));
+        assert!(!has_row(&screen, "models.b"));
+        s.model_filter = "all".into();
+        s.model_sort = "size".into();
+        let screen = build(&s, Tab::Models);
+        let ids: Vec<_> = rows(&screen)
+            .iter()
+            .filter(|r| r.id == "models.b" || r.id == "models.c")
+            .map(|r| r.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["models.c", "models.b"]);
+        s.model_sort = "accuracy".into();
+        let screen = build(&s, Tab::Models);
+        let first = rows(&screen)
+            .into_iter()
+            .find(|r| r.id == "models.b" || r.id == "models.c")
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(first, "models.c");
+        s.model_filter = "live".into();
+        let screen = build(&s, Tab::Models);
+        assert!(screen
+            .blocks
+            .contains(&Block::Note("No models match. Try another filter.".into())));
+    }
+
+    #[test]
+    fn the_models_tab_leads_with_search_filter_and_sort() {
+        let mut s = ready();
+        s.model_loaded = true;
+        let screen = build(&s, Tab::Models);
+        assert!(matches!(
+            row(&screen, "models.search").control,
+            Control::Search { .. }
+        ));
+        assert!(has_row(&screen, "models.filter"));
+        assert!(has_row(&screen, "models.sort"));
+        let r = row(&screen, "models.unload");
+        assert_eq!(r.title, "Loaded in memory");
+        assert!(r.detail.is_none());
+        let titles: Vec<_> = screen
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Group { title, .. } => Some(title.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                None,
+                Some("Installed".into()),
+                None,
+                Some("Recommended".into())
+            ]
+        );
     }
 
     #[test]
@@ -1906,7 +2251,7 @@ mod tests {
         );
         let acts = actions(&screen);
         assert!(acts.contains(&Action::SelectModel("c".into())));
-        assert!(acts.contains(&Action::DeleteModel("c".into())));
+        assert!(acts.contains(&Action::ConfirmDelete("model:c".into())));
         assert!(acts.contains(&Action::DownloadModel("b".into())));
         // The model in use can't be deleted from here.
         assert!(!acts.contains(&Action::DeleteModel("a".into())));
@@ -1918,7 +2263,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(titles, vec!["Installed", "Available"]);
+        assert_eq!(titles, vec!["Installed", "Recommended"]);
     }
 
     #[test]
@@ -2031,11 +2376,60 @@ mod tests {
             .unwrap()
             .current_binding = "shift_left+command_right".into();
         let screen = build(&s, Tab::Cleanup);
-        let detail = row(&screen, "cleanup.shortcut")
-            .detail
-            .clone()
-            .unwrap_or_default();
-        assert!(detail.contains("Right ⌘"), "{detail}");
+        assert!(matches!(&screen.blocks[1], Block::Alert(t)
+            if t == "Cleanup shortcut overlaps Right ⌘, so both would start. Choose another."));
+    }
+
+    #[test]
+    fn a_preset_command_is_read_only_and_a_custom_one_is_editable() {
+        let mut s = ready();
+        s.settings.post_process_enabled = true;
+        s.command.enabled = true;
+        let screen = build(&s, Tab::Cleanup);
+        let r = row(&screen, "cleanup.command");
+        assert_eq!(r.control, Control::None);
+        assert_eq!(r.detail.as_deref(), Some("claude -p --model haiku"));
+        s.command.command = "my-tool --fast".into();
+        let screen = build(&s, Tab::Cleanup);
+        assert!(matches!(
+            row(&screen, "cleanup.command").control,
+            Control::Text {
+                wide: true,
+                monospace: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn settings_start_with_the_microphone_and_end_with_about() {
+        let screen = build(&ready(), Tab::Settings);
+        assert_eq!(rows(&screen)[0].id, "settings.microphone");
+        let titles: Vec<_> = screen
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Group { title, .. } => title.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Audio",
+                "Dictation",
+                "Pasting",
+                "History",
+                "General",
+                "About"
+            ]
+        );
+        assert!(actions(&screen).contains(&Action::OpenUrl(
+            "https://github.com/thekindofme/Handy/issues".into()
+        )));
+        assert!(actions(&screen).contains(&Action::OpenUrl(
+            "https://handybar.yasithfernando.com".into()
+        )));
     }
 
     #[test]

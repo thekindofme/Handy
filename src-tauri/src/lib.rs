@@ -7,6 +7,7 @@ mod autostart;
 mod catalog;
 mod chinese_script;
 mod cleanup_command;
+mod cleanup_context;
 pub mod cli;
 mod clipboard;
 mod commands;
