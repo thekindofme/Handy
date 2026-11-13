@@ -48,6 +48,9 @@ struct Tree {
     /// What it was built from; an equal screen means nothing to redraw.
     screen: Screen,
     outer: Retained<NSStackView>,
+    /// The tab bar; a click leaves it showing the clicked tab, so it is
+    /// reset whenever this tree comes back on screen.
+    tabs: Retained<NSView>,
     scroll: Retained<NSScrollView>,
     slots: Vec<Slot>,
     /// Tags carry this so a control from a replaced tree can't fire.
@@ -863,6 +866,7 @@ fn swap_in(ui: &mut Ui, tab: Tab) {
     let Some(tree) = ui.trees.get(&tab) else {
         return;
     };
+    let _: () = unsafe { msg_send![&*tree.tabs, setSelectedSegment: tab.index() as isize] };
     for sub in ui.root.subviews().iter() {
         sub.removeFromSuperview();
     }
@@ -969,6 +973,7 @@ fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation
     Tree {
         screen,
         outer,
+        tabs,
         scroll,
         slots,
         generation,
