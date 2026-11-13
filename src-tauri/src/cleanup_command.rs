@@ -40,6 +40,30 @@ pub struct CommandSettings {
     pub prewarm: bool,
 }
 
+/// Ready-made commands: (id, label, command, time limit in seconds).
+pub const PRESETS: [(&str, &str, &str, u64); 2] = [
+    (
+        "claude_haiku",
+        "Claude Code (Haiku)",
+        "claude -p --model haiku",
+        15,
+    ),
+    (
+        "codex",
+        "Codex",
+        "codex exec --skip-git-repo-check --ephemeral -c model_reasoning_effort=low -",
+        30,
+    ),
+];
+
+/// The preset a command is, if any.
+pub fn preset_of(command: &str) -> Option<&'static str> {
+    PRESETS
+        .iter()
+        .find(|(_, _, c, _)| c.trim() == command.trim())
+        .map(|(id, ..)| *id)
+}
+
 impl Default for CommandSettings {
     fn default() -> Self {
         CommandSettings {
@@ -120,6 +144,13 @@ struct Warm {
 
 static WARM: Mutex<Option<Warm>> = Mutex::new(None);
 
+/// Why the last run fell back to the raw text; cleared by a success.
+static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn last_error() -> Option<String> {
+    LAST_ERROR.lock().ok().and_then(|e| e.clone())
+}
+
 fn spawn(command: &str) -> std::io::Result<Child> {
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c")
@@ -197,7 +228,7 @@ pub async fn run_if_selected(app: &AppHandle, transcript: &str) -> Option<Comman
         return None;
     }
     if transcript.trim().is_empty() {
-        return Some(CommandOutcome::Done(String::new()));
+        return None; // Handy skips cleanup for an empty transcript
     }
     let input = build_input(&selected_prompt(app), transcript);
     let transcript = transcript.to_string();
@@ -205,6 +236,12 @@ pub async fn run_if_selected(app: &AppHandle, transcript: &str) -> Option<Comman
         tauri::async_runtime::spawn_blocking(move || run_blocking(&settings, &input, &transcript))
             .await
             .unwrap_or_else(|e| CommandOutcome::Failed(e.to_string()));
+    if let Ok(mut last) = LAST_ERROR.lock() {
+        *last = match &outcome {
+            CommandOutcome::Done(_) => None,
+            CommandOutcome::Failed(why) => Some(why.clone()),
+        };
+    }
     Some(outcome)
 }
 
@@ -259,18 +296,40 @@ fn run_blocking(settings: &CommandSettings, input: &str, transcript: &str) -> Co
     let err = err_reader.join().unwrap_or_default();
 
     let Some(status) = status else {
-        return CommandOutcome::Failed(format!("timed out after {} s", settings.timeout_secs));
+        return CommandOutcome::Failed(format!(
+            "it took longer than {} seconds",
+            settings.timeout_secs
+        ));
     };
     if !status.success() {
-        let err = err.lines().last().unwrap_or("").trim().to_string();
-        return CommandOutcome::Failed(format!("exited with {status}: {err}"));
+        // Some tools (claude -p) print their error on stdout.
+        let said = [err.as_str(), out.as_str()]
+            .iter()
+            .flat_map(|s| s.lines().rev())
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect::<String>();
+        let code = status
+            .code()
+            .map_or("a signal".to_string(), |c| c.to_string());
+        return CommandOutcome::Failed(if said.is_empty() {
+            format!("the command exited with {code}")
+        } else {
+            format!("the command exited with {code}: {said}")
+        });
     }
     let cleaned = clean_output(&out);
     if cleaned.is_empty() {
-        return CommandOutcome::Failed("no output".into());
+        return CommandOutcome::Failed("the command printed nothing".into());
     }
     if !is_faithful(transcript, &cleaned) {
-        return CommandOutcome::Failed("output didn't keep your words".into());
+        return CommandOutcome::Failed(format!(
+            "its reply didn't keep your words (it said: {})",
+            cleaned.chars().take(120).collect::<String>()
+        ));
     }
     info!("Cleanup command finished in {:?}", started.elapsed());
     CommandOutcome::Done(cleaned)
@@ -394,6 +453,22 @@ mod tests {
         match run_blocking(&settings, "hello there friend", "hello there friend") {
             CommandOutcome::Done(t) => assert_eq!(t, "HELLO THERE FRIEND"),
             CommandOutcome::Failed(e) => panic!("{e}"),
+        }
+    }
+
+    #[test]
+    fn an_error_printed_on_stdout_is_reported() {
+        let s = CommandSettings {
+            enabled: true,
+            command: "echo 'Failed to authenticate: session expired'; exit 1".into(),
+            timeout_secs: 5,
+            prewarm: false,
+        };
+        match run_blocking(&s, "x", "x") {
+            CommandOutcome::Failed(why) => {
+                assert!(why.contains("Failed to authenticate"), "{why}")
+            }
+            CommandOutcome::Done(t) => panic!("{t}"),
         }
     }
 

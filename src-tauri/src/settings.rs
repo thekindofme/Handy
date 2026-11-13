@@ -1390,10 +1390,7 @@ pub fn update_checks_forced_disabled() -> bool {
     *IS_UPDATER_DISABLED.get_or_init(|| {
         // Handy Bar (macOS fork): upstream's updater would replace this
         // build with upstream's, and the menu bar UI has no updater anyway.
-        #[cfg(target_os = "macos")]
-        return true;
-        #[cfg(not(target_os = "macos"))]
-        utils::env_flag_enabled("HANDY_DISABLE_UPDATER")
+        cfg!(target_os = "macos") || utils::env_flag_enabled("HANDY_DISABLE_UPDATER")
     })
 }
 

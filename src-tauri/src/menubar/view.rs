@@ -143,6 +143,7 @@ pub enum ChoiceKey {
     /// Which provider runs cleanup, or "command".
     CleanupEngine,
     CommandTimeout,
+    CommandPreset,
     Prompt,
 }
 
@@ -176,6 +177,7 @@ impl ChoiceKey {
             ChoiceKey::Model => "model",
             ChoiceKey::CleanupEngine => "cleanup_engine",
             ChoiceKey::CommandTimeout => "command_timeout",
+            ChoiceKey::CommandPreset => "command_preset",
             ChoiceKey::Prompt => "prompt",
         }
     }
@@ -372,6 +374,8 @@ pub struct Snapshot {
     /// Another app has Secure Input on, which can block the shortcut.
     pub secure_input: bool,
     pub model_loaded: bool,
+    /// Why the command-line cleanup last fell back to the raw text.
+    pub command_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,6 +1280,42 @@ fn settings(s: &Snapshot) -> Vec<Block> {
 }
 
 /// The whole popover for `tab`.
+/// The keys of a shortcut, ignoring which side a modifier is on.
+fn shortcut_keys(binding: &str) -> std::collections::BTreeSet<String> {
+    binding
+        .split('+')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let p = p.to_ascii_lowercase();
+            p.strip_suffix("_left")
+                .or_else(|| p.strip_suffix("_right"))
+                .unwrap_or(&p)
+                .to_string()
+        })
+        .collect()
+}
+
+/// True when pressing one shortcut also presses the other (one's keys
+/// contain the other's), so both would start.
+pub fn shortcuts_overlap(a: &str, b: &str) -> bool {
+    let (a, b) = (shortcut_keys(a), shortcut_keys(b));
+    !a.is_empty() && !b.is_empty() && (a.is_subset(&b) || b.is_subset(&a))
+}
+
+/// Another dictation binding whose shortcut overlaps `binding_id`'s.
+pub fn overlapping_binding(s: &Snapshot, binding_id: &str) -> Option<String> {
+    let mine = &s.settings.bindings.get(binding_id)?.current_binding;
+    s.settings
+        .bindings
+        .iter()
+        .filter(|(id, _)| id.as_str() != binding_id && id.as_str() != "cancel")
+        .filter(|(id, _)| {
+            id.as_str() != "transcribe_with_post_process" || s.settings.post_process_enabled
+        })
+        .map(|(_, b)| b.current_binding.clone())
+        .find(|other| shortcuts_overlap(mine, other))
+}
+
 /// Home's quick model switch, among downloaded models.
 fn model_choice_row(s: &Snapshot) -> Option<Row> {
     let mut installed: Vec<&ModelInfo> = s.models.iter().filter(|m| m.is_downloaded).collect();
@@ -1312,13 +1352,22 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
             .detail("Has its own shortcut"),
     ];
     if st.post_process_enabled {
-        top.push(binding_row(
+        let mut row = binding_row(
             s,
             "cleanup",
             "transcribe_with_post_process",
             "shortcut",
             "Cleanup shortcut",
-        ));
+        );
+        if s.accessibility_permission && s.capturing_shortcut.is_none() {
+            if let Some(main) = overlapping_binding(s, "transcribe_with_post_process") {
+                row = row.detail(format!(
+                    "Clashes with {}: pick another",
+                    pretty_shortcut(&main)
+                ));
+            }
+        }
+        top.push(row);
     }
     blocks.push(Block::Group {
         title: None,
@@ -1348,6 +1397,17 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
         popup(ChoiceKey::CleanupEngine, options, &engine),
     )];
     if s.command.enabled {
+        let mut presets: Vec<Choice> = crate::cleanup_command::PRESETS
+            .iter()
+            .map(|(id, label, ..)| choice(id, label))
+            .collect();
+        presets.push(choice("custom", "Custom command"));
+        let current = crate::cleanup_command::preset_of(&s.command.command).unwrap_or("custom");
+        run.push(Row::new(
+            "cleanup.command_preset",
+            "Tool",
+            popup(ChoiceKey::CommandPreset, presets, current),
+        ));
         run.push(Row::new(
             "cleanup.command",
             "Command",
@@ -1423,9 +1483,14 @@ fn cleanup(s: &Snapshot) -> Vec<Block> {
         title: None,
         rows: run,
     });
+    if let (true, Some(why)) = (s.command.enabled, &s.command_error) {
+        blocks.push(Block::Alert(format!(
+            "The last cleanup didn't work, so your original text was pasted: {why}"
+        )));
+    }
     if s.command.enabled {
         blocks.push(Block::Note(
-            "Your prompt and words go to the command on standard input, and what it prints is pasted. Fastest: claude -p --model haiku. Codex works with codex exec --skip-git-repo-check --ephemeral -c model_reasoning_effort=low - but takes several seconds. If the command is slow, fails, or drops your words, your original text is pasted.".to_string(),
+            "Your prompt and words go to the command on standard input, and what it prints is pasted. Claude Code (Haiku) is the fastest; Codex takes several seconds. Both use the subscription you're signed in with. If the command is slow, fails, or drops your words, your original text is pasted.".to_string(),
         ));
     }
 
@@ -1619,6 +1684,7 @@ mod tests {
             command: CommandSettings::default(),
             secure_input: false,
             model_loaded: false,
+            command_error: None,
         }
     }
 
@@ -1944,6 +2010,35 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_shortcuts_are_flagged() {
+        assert!(shortcuts_overlap(
+            "command_right",
+            "shift_left+command_right"
+        ));
+        assert!(shortcuts_overlap("option+space", "option+space"));
+        assert!(shortcuts_overlap("option+space", "option+shift+space"));
+        assert!(!shortcuts_overlap("command_right", "option_right"));
+        let mut s = ready();
+        s.settings.post_process_enabled = true;
+        s.settings
+            .bindings
+            .get_mut("transcribe")
+            .unwrap()
+            .current_binding = "command_right".into();
+        s.settings
+            .bindings
+            .get_mut("transcribe_with_post_process")
+            .unwrap()
+            .current_binding = "shift_left+command_right".into();
+        let screen = build(&s, Tab::Cleanup);
+        let detail = row(&screen, "cleanup.shortcut")
+            .detail
+            .clone()
+            .unwrap_or_default();
+        assert!(detail.contains("Right ⌘"), "{detail}");
+    }
+
+    #[test]
     fn cleanup_off_offers_only_the_switch() {
         let s = ready();
         let screen = build(&s, Tab::Cleanup);
@@ -1961,6 +2056,7 @@ mod tests {
         for id in [
             "cleanup.shortcut",
             "cleanup.engine",
+            "cleanup.command_preset",
             "cleanup.command",
             "cleanup.command_timeout",
             "cleanup.command_prewarm",

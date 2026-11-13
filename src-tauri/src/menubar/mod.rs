@@ -328,6 +328,7 @@ pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
         now: chrono::Utc::now().timestamp(),
         command: crate::cleanup_command::load(app),
         secure_input: crate::secure_input::tray_warning_active(app),
+        command_error: crate::cleanup_command::last_error(),
         model_loaded: app
             .try_state::<Arc<crate::managers::transcription::TranscriptionManager>>()
             .is_some_and(|tm| tm.is_model_loaded()),
@@ -555,6 +556,19 @@ fn set_choice(app: &AppHandle, key: ChoiceKey, value: String) -> Result<(), Stri
                 sc::set_post_process_provider(a, value)
             }
         }
+        ChoiceKey::CommandPreset => {
+            if let Some((_, _, command, secs)) = crate::cleanup_command::PRESETS
+                .iter()
+                .find(|(id, ..)| *id == value)
+            {
+                update_command(app, |c| {
+                    c.command = command.to_string();
+                    c.timeout_secs = *secs;
+                });
+            }
+            // "Custom": keep the command; the field below is for editing it.
+            Ok(())
+        }
         ChoiceKey::CommandTimeout => {
             let secs: u64 = value.parse().map_err(|e| format!("{e}"))?;
             update_command(app, |c| c.timeout_secs = secs);
@@ -679,6 +693,25 @@ fn on_key_event(app: &AppHandle, event: KeyEvent) {
                 .filter(|b| !b.is_empty())
                 .unwrap_or_else(|| "transcribe".into());
             stop_capture(app);
+            let settings = settings::get_settings(app);
+            let clash = settings
+                .bindings
+                .iter()
+                .filter(|(id, _)| **id != binding_id && id.as_str() != "cancel")
+                .map(|(_, b)| b.current_binding.clone())
+                .find(|other| view::shortcuts_overlap(&binding, other));
+            if let Some(other) = clash {
+                flash(
+                    app,
+                    format!(
+                        "{} overlaps {}, so both would start. Try another.",
+                        view::pretty_shortcut(&binding),
+                        view::pretty_shortcut(&other)
+                    ),
+                );
+                request_refresh(app);
+                return;
+            }
             match crate::shortcut::change_binding(app.clone(), binding_id, binding.clone()) {
                 Ok(r)
                     if serde_json::to_value(&r)
