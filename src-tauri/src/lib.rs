@@ -6,6 +6,7 @@ pub mod audio_toolkit;
 mod autostart;
 mod catalog;
 mod chinese_script;
+mod cleanup_command;
 pub mod cli;
 mod clipboard;
 mod commands;

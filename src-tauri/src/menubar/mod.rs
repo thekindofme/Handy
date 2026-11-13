@@ -54,6 +54,8 @@ struct Inner {
     tab: Option<Tab>,
     progress: HashMap<String, f64>,
     capture: Option<Capture>,
+    /// The binding `capture` is recording for.
+    capture_binding: String,
     partial: String,
     flash: Option<(String, Instant)>,
     microphones: Vec<String>,
@@ -124,7 +126,7 @@ pub fn install(app: &AppHandle) {
     }
 }
 
-/// Left click opens the popover; right click keeps the menu.
+/// Any click on the menu bar icon opens the popover.
 pub fn configure_tray(
     builder: tauri::tray::TrayIconBuilder<tauri::Wry>,
 ) -> tauri::tray::TrayIconBuilder<tauri::Wry> {
@@ -132,8 +134,10 @@ pub fn configure_tray(
     builder
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
+            // Either button opens the one popover: everything the old
+            // right-click menu did is in it.
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button: MouseButton::Left | MouseButton::Right,
                 button_state: MouseButtonState::Up,
                 ..
             } = event
@@ -292,7 +296,10 @@ pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
             }
             (
                 inner.progress.clone(),
-                inner.capture.is_some(),
+                inner
+                    .capture
+                    .is_some()
+                    .then(|| inner.capture_binding.clone()),
                 inner.partial.clone(),
                 inner.flash.as_ref().map(|(m, _)| m.clone()),
                 inner.microphones.clone(),
@@ -319,6 +326,11 @@ pub(crate) fn snapshot_for(app: &AppHandle, tab: Option<Tab>) -> Snapshot {
         notice,
         version: app.package_info().version.to_string(),
         now: chrono::Utc::now().timestamp(),
+        command: crate::cleanup_command::load(app),
+        secure_input: crate::secure_input::tray_warning_active(app),
+        model_loaded: app
+            .try_state::<Arc<crate::managers::transcription::TranscriptionManager>>()
+            .is_some_and(|tm| tm.is_model_loaded()),
     }
 }
 
@@ -440,6 +452,71 @@ fn set_bool(app: &AppHandle, key: BoolKey, on: bool) -> Result<(), String> {
         BoolKey::AutoSubmit => sc::change_auto_submit_setting(a, on),
         BoolKey::FillerWordRemoval => sc::change_filler_word_removal_enabled_setting(a, on),
         BoolKey::VoiceActivityDetection => sc::change_vad_enabled_setting(a, on),
+        BoolKey::PostProcess => sc::change_post_process_enabled_setting(a, on),
+        BoolKey::CommandPrewarm => {
+            update_command(app, |c| c.prewarm = on);
+            Ok(())
+        }
+    }
+}
+
+/// Changes Handy Bar's command-line cleanup settings.
+fn update_command(app: &AppHandle, f: impl FnOnce(&mut crate::cleanup_command::CommandSettings)) {
+    let mut c = crate::cleanup_command::load(app);
+    f(&mut c);
+    crate::cleanup_command::save(app, &c);
+    if c.enabled {
+        crate::cleanup_command::warm_up();
+    }
+}
+
+fn active_provider_id(app: &AppHandle) -> String {
+    settings::get_settings(app).post_process_provider_id
+}
+
+fn set_text(app: &AppHandle, key: view::TextKey, value: String) -> Result<(), String> {
+    use crate::shortcut as sc;
+    use view::TextKey;
+    let a = app.clone();
+    let value = value.trim_end_matches('\n').to_string();
+    match key {
+        TextKey::Command => {
+            update_command(app, |c| c.command = value.trim().to_string());
+            Ok(())
+        }
+        TextKey::ApiKey => {
+            sc::change_post_process_api_key_setting(a, active_provider_id(app), value.trim().into())
+        }
+        TextKey::BaseUrl => sc::change_post_process_base_url_setting(
+            a,
+            active_provider_id(app),
+            value.trim().into(),
+        ),
+        TextKey::ModelName => {
+            sc::change_post_process_model_setting(a, active_provider_id(app), value.trim().into())
+        }
+        TextKey::Prompt => {
+            let st = settings::get_settings(app);
+            let id = st
+                .post_process_selected_prompt_id
+                .clone()
+                .or_else(|| st.post_process_prompts.first().map(|p| p.id.clone()))
+                .ok_or("No prompt to edit")?;
+            let name = st
+                .post_process_prompts
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone())
+                .ok_or("That prompt is gone")?;
+            if st
+                .post_process_prompts
+                .iter()
+                .any(|p| p.id == id && p.prompt == value)
+            {
+                return Ok(());
+            }
+            sc::update_post_process_prompt(a, id, name, value)
+        }
     }
 }
 
@@ -464,6 +541,26 @@ fn set_choice(app: &AppHandle, key: ChoiceKey, value: String) -> Result<(), Stri
         ChoiceKey::AutoSubmitKey => sc::change_auto_submit_key_setting(a, value),
         ChoiceKey::OverlayStyle => sc::change_overlay_style_setting(a, value),
         ChoiceKey::OverlayPosition => sc::change_overlay_position_setting(a, value),
+        ChoiceKey::Model => {
+            crate::commands::models::switch_active_model(&a, &value)?;
+            tray::update_tray_menu(&a);
+            Ok(())
+        }
+        ChoiceKey::CleanupEngine => {
+            let command = value == view::COMMAND_ENGINE;
+            update_command(app, |c| c.enabled = command);
+            if command {
+                Ok(())
+            } else {
+                sc::set_post_process_provider(a, value)
+            }
+        }
+        ChoiceKey::CommandTimeout => {
+            let secs: u64 = value.parse().map_err(|e| format!("{e}"))?;
+            update_command(app, |c| c.timeout_secs = secs);
+            Ok(())
+        }
+        ChoiceKey::Prompt => sc::set_post_process_selected_prompt(a, value),
         ChoiceKey::UnloadTimeout => {
             crate::commands::transcription::set_model_unload_timeout(a, parse(&value)?);
             Ok(())
@@ -528,14 +625,14 @@ fn finish_download(app: &AppHandle, model_id: String, result: Result<(), String>
     }
 }
 
-fn start_capture(app: &AppHandle) -> Result<(), String> {
+fn start_capture(app: &AppHandle, binding_id: &str) -> Result<(), String> {
     // The key listener starts once Accessibility is granted; if that just
     // happened, start it now rather than failing.
     if !permissions().1 {
         return Err("Allow Accessibility access first, then try again.".into());
     }
     start_input(app);
-    crate::shortcut::handy_keys::start_handy_keys_recording(app.clone(), "transcribe".into())
+    crate::shortcut::handy_keys::start_handy_keys_recording(app.clone(), binding_id.to_string())
         .map_err(|e| {
             if e.contains("secure-input") {
                 "Another app is using secure input (a password field), so keys can't be read right now.".to_string()
@@ -546,6 +643,7 @@ fn start_capture(app: &AppHandle) -> Result<(), String> {
     if let Some(s) = state(app) {
         let mut inner = s.lock();
         inner.capture = Some(Capture::new());
+        inner.capture_binding = binding_id.to_string();
         inner.partial.clear();
     }
     Ok(())
@@ -576,9 +674,12 @@ fn on_key_event(app: &AppHandle, event: KeyEvent) {
             request_refresh(app);
         }
         Step::Commit(binding) => {
+            let binding_id = state(app)
+                .map(|s| s.lock().capture_binding.clone())
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| "transcribe".into());
             stop_capture(app);
-            match crate::shortcut::change_binding(app.clone(), "transcribe".into(), binding.clone())
-            {
+            match crate::shortcut::change_binding(app.clone(), binding_id, binding.clone()) {
                 Ok(r)
                     if serde_json::to_value(&r)
                         .ok()
@@ -719,7 +820,10 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
         }
         // Switching audio devices restarts the audio stream, which can block
         // for a while: keep it off the main thread so the popover stays live.
-        Action::SetChoice(key @ (ChoiceKey::Microphone | ChoiceKey::OutputDevice), value) => {
+        Action::SetChoice(
+            key @ (ChoiceKey::Microphone | ChoiceKey::OutputDevice | ChoiceKey::Model),
+            value,
+        ) => {
             in_background(app, move |a| set_choice(a, key, value));
             Ok(())
         }
@@ -735,13 +839,25 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
             }
             r
         }
-        Action::StartShortcutCapture => start_capture(app),
+        Action::StartShortcutCapture(binding_id) => start_capture(app, &binding_id),
         Action::CancelShortcutCapture => {
             stop_capture(app);
             Ok(())
         }
-        Action::ResetShortcut => {
-            crate::shortcut::reset_binding(app.clone(), "transcribe".into()).map(|_| ())
+        Action::ResetShortcut(binding_id) => {
+            crate::shortcut::reset_binding(app.clone(), binding_id).map(|_| ())
+        }
+        Action::SetText(key, value) => set_text(app, key, value),
+        Action::UnloadModel => {
+            let tm = app.state::<Arc<crate::managers::transcription::TranscriptionManager>>();
+            if tm.is_model_loaded() {
+                tm.ensure_model_unlocked().map(|()| {
+                    tm.request_unload();
+                    flash(app, "Model unloaded");
+                })
+            } else {
+                Ok(())
+            }
         }
         Action::OpenRecordingsFolder => crate::commands::open_recordings_folder(app.clone()),
         Action::OpenLogs => crate::commands::open_log_dir(app.clone()),

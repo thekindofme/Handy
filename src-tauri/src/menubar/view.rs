@@ -5,6 +5,7 @@
 //! about AppKit, so every screen can be unit tested; `appkit.rs` only draws
 //! what this returns.
 
+use crate::cleanup_command::CommandSettings;
 use crate::managers::history::HistoryEntry;
 use crate::managers::model::ModelInfo;
 use crate::settings::{
@@ -13,23 +14,31 @@ use crate::settings::{
 };
 use std::collections::HashMap;
 
-/// The popover's four tabs, in segmented-control order.
+/// The popover's tabs, in segmented-control order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
     Home,
     History,
     Models,
+    Cleanup,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Home, Tab::History, Tab::Models, Tab::Settings];
+    pub const ALL: [Tab; 5] = [
+        Tab::Home,
+        Tab::History,
+        Tab::Models,
+        Tab::Cleanup,
+        Tab::Settings,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Home => "Home",
             Tab::History => "History",
             Tab::Models => "Models",
+            Tab::Cleanup => "Cleanup",
             Tab::Settings => "Settings",
         }
     }
@@ -66,11 +75,23 @@ pub enum BoolKey {
     AutoSubmit,
     FillerWordRemoval,
     VoiceActivityDetection,
+    PostProcess,
+    CommandPrewarm,
 }
 
 impl BoolKey {
+    /// The switch's current state.
+    pub fn value(self, s: &Snapshot) -> bool {
+        match self {
+            BoolKey::CommandPrewarm => s.command.prewarm,
+            _ => self.get(&s.settings),
+        }
+    }
+
     pub fn get(self, s: &AppSettings) -> bool {
         match self {
+            BoolKey::PostProcess => s.post_process_enabled,
+            BoolKey::CommandPrewarm => false, // not an upstream setting; see `value`
             BoolKey::AudioFeedback => s.audio_feedback,
             BoolKey::Autostart => s.autostart_enabled,
             BoolKey::TranslateToEnglish => s.translate_to_english,
@@ -95,6 +116,8 @@ impl BoolKey {
             BoolKey::AutoSubmit => "auto_submit",
             BoolKey::FillerWordRemoval => "filler_word_removal",
             BoolKey::VoiceActivityDetection => "vad",
+            BoolKey::PostProcess => "post_process",
+            BoolKey::CommandPrewarm => "command_prewarm",
         }
     }
 }
@@ -115,6 +138,22 @@ pub enum ChoiceKey {
     AutoSubmitKey,
     OverlayStyle,
     OverlayPosition,
+    /// The active transcription model, from Home.
+    Model,
+    /// Which provider runs cleanup, or "command".
+    CleanupEngine,
+    CommandTimeout,
+    Prompt,
+}
+
+/// Settings typed into text fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TextKey {
+    Command,
+    ApiKey,
+    BaseUrl,
+    ModelName,
+    Prompt,
 }
 
 #[cfg(test)]
@@ -134,6 +173,10 @@ impl ChoiceKey {
             ChoiceKey::AutoSubmitKey => "auto_submit_key",
             ChoiceKey::OverlayStyle => "overlay_style",
             ChoiceKey::OverlayPosition => "overlay_position",
+            ChoiceKey::Model => "model",
+            ChoiceKey::CleanupEngine => "cleanup_engine",
+            ChoiceKey::CommandTimeout => "command_timeout",
+            ChoiceKey::Prompt => "prompt",
         }
     }
 }
@@ -154,9 +197,12 @@ pub enum Action {
     RequestAccessibility,
     SetBool(BoolKey, bool),
     SetChoice(ChoiceKey, String),
-    StartShortcutCapture,
+    /// Record a new shortcut for this binding ("transcribe", …).
+    StartShortcutCapture(String),
     CancelShortcutCapture,
-    ResetShortcut,
+    ResetShortcut(String),
+    SetText(TextKey, String),
+    UnloadModel,
     OpenRecordingsFolder,
     OpenLogs,
     Quit,
@@ -220,6 +266,16 @@ pub enum Control {
     },
     /// A green check with a short label ("Allowed", "In use").
     Done(String),
+    /// A text field; the value is saved when editing ends.
+    Text {
+        key: TextKey,
+        value: String,
+        placeholder: String,
+        secure: bool,
+        /// 1 for a single line; more for a scrolling multi-line editor,
+        /// which takes the row's full width under its title.
+        lines: u16,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -300,7 +356,8 @@ pub struct Snapshot {
     pub languages: Option<Languages>,
     pub mic_permission: bool,
     pub accessibility_permission: bool,
-    pub capturing_shortcut: bool,
+    /// The binding whose shortcut is being recorded, if any.
+    pub capturing_shortcut: Option<String>,
     /// What's held so far while capturing, e.g. `option+`.
     pub partial_shortcut: String,
     /// One-line message such as "Copied" or an error from the last action.
@@ -310,6 +367,11 @@ pub struct Snapshot {
     pub version: String,
     /// Unix seconds, for relative history times.
     pub now: i64,
+    /// Handy Bar's command-line cleanup settings.
+    pub command: CommandSettings,
+    /// Another app has Secure Input on, which can block the shortcut.
+    pub secure_input: bool,
+    pub model_loaded: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -623,8 +685,19 @@ fn header(s: &Snapshot) -> Header {
 }
 
 fn shortcut_row(s: &Snapshot, tab: &str) -> Row {
-    let id = format!("{tab}.shortcut");
-    if s.capturing_shortcut {
+    binding_row(s, tab, "transcribe", "shortcut", "Shortcut")
+}
+
+/// A row that shows and records the shortcut for `binding_id`.
+fn binding_row(s: &Snapshot, tab: &str, binding_id: &str, name: &str, title: &str) -> Row {
+    let id = format!("{tab}.{name}");
+    let current = s
+        .settings
+        .bindings
+        .get(binding_id)
+        .map(|b| b.current_binding.clone())
+        .unwrap_or_default();
+    if s.capturing_shortcut.as_deref() == Some(binding_id) {
         let held = if s.partial_shortcut.is_empty() {
             "Type a shortcut…".to_string()
         } else {
@@ -632,7 +705,7 @@ fn shortcut_row(s: &Snapshot, tab: &str) -> Row {
         };
         Row::new(
             id.clone(),
-            "Shortcut",
+            title,
             Control::Buttons(vec![button(
                 format!("{id}.cancel"),
                 "Cancel",
@@ -645,34 +718,33 @@ fn shortcut_row(s: &Snapshot, tab: &str) -> Row {
         // shortcut can't fire or be changed, so the button leads to the fix.
         Row::new(
             id.clone(),
-            "Shortcut",
+            title,
             Control::Buttons(vec![button(
                 format!("{id}.change"),
-                &pretty_shortcut(&transcribe_binding(s)),
+                &pretty_shortcut(&current),
                 Action::RequestAccessibility,
             )]),
         )
         .detail("Needs Accessibility access")
     } else {
-        let binding = transcribe_binding(s);
         let is_default = s
             .settings
             .bindings
-            .get("transcribe")
+            .get(binding_id)
             .is_some_and(|b| b.current_binding == b.default_binding);
         let mut buttons = vec![button(
             format!("{id}.change"),
-            &pretty_shortcut(&binding),
-            Action::StartShortcutCapture,
+            &pretty_shortcut(&current),
+            Action::StartShortcutCapture(binding_id.to_string()),
         )];
         if !is_default {
             buttons.push(button(
                 format!("{id}.reset"),
                 "Reset",
-                Action::ResetShortcut,
+                Action::ResetShortcut(binding_id.to_string()),
             ));
         }
-        Row::new(id, "Shortcut", Control::Buttons(buttons))
+        Row::new(id, title, Control::Buttons(buttons))
     }
 }
 
@@ -745,7 +817,7 @@ fn switch_row(tab: &str, key: BoolKey, title: &str, s: &Snapshot) -> Row {
         title,
         Control::Switch {
             key,
-            on: key.get(&s.settings),
+            on: key.value(s),
         },
     )
 }
@@ -795,7 +867,16 @@ fn home(s: &Snapshot) -> Vec<Block> {
         });
     }
 
+    if s.secure_input {
+        blocks.push(Block::Alert(
+            "Another app has Secure Input on (often a password field), so your shortcut may not work until it's off.".to_string(),
+        ));
+    }
+
     let mut quick = vec![microphone_row(s, "home")];
+    if let Some(row) = model_choice_row(s) {
+        quick.push(row);
+    }
     if let Some(row) = language_row(s, "home") {
         quick.push(row);
     }
@@ -909,6 +990,21 @@ fn models(s: &Snapshot) -> Vec<Block> {
             .then(a.size_mb.cmp(&b.size_mb))
     });
     let mut blocks = Vec::new();
+    if s.model_loaded {
+        blocks.push(Block::Group {
+            title: None,
+            rows: vec![Row::new(
+                "models.unload",
+                "Model is loaded",
+                Control::Buttons(vec![button(
+                    "models.unload.button",
+                    "Free memory",
+                    Action::UnloadModel,
+                )]),
+            )
+            .detail("It loads again on your next dictation")],
+        });
+    }
     if installed.is_empty() {
         blocks.push(Block::Note(
             "No models downloaded yet. Pick one below.".to_string(),
@@ -1180,6 +1276,200 @@ fn settings(s: &Snapshot) -> Vec<Block> {
 }
 
 /// The whole popover for `tab`.
+/// Home's quick model switch, among downloaded models.
+fn model_choice_row(s: &Snapshot) -> Option<Row> {
+    let mut installed: Vec<&ModelInfo> = s.models.iter().filter(|m| m.is_downloaded).collect();
+    if installed.len() < 2 {
+        return None;
+    }
+    installed.sort_by(|a, b| a.name.cmp(&b.name));
+    let options = installed.iter().map(|m| choice(&m.id, &m.name)).collect();
+    Some(Row::new(
+        "home.model",
+        "Model",
+        popup(ChoiceKey::Model, options, &s.settings.selected_model),
+    ))
+}
+
+fn text(key: TextKey, value: &str, placeholder: &str) -> Control {
+    Control::Text {
+        key,
+        value: value.to_string(),
+        placeholder: placeholder.to_string(),
+        secure: false,
+        lines: 1,
+    }
+}
+
+pub const COMMAND_ENGINE: &str = "command";
+
+/// AI cleanup: Handy's post-processing, plus Handy Bar's command-line tool.
+fn cleanup(s: &Snapshot) -> Vec<Block> {
+    let st = &s.settings;
+    let mut blocks = Vec::new();
+    let mut top = vec![
+        switch_row("cleanup", BoolKey::PostProcess, "Clean up with AI", s)
+            .detail("Has its own shortcut"),
+    ];
+    if st.post_process_enabled {
+        top.push(binding_row(
+            s,
+            "cleanup",
+            "transcribe_with_post_process",
+            "shortcut",
+            "Cleanup shortcut",
+        ));
+    }
+    blocks.push(Block::Group {
+        title: None,
+        rows: top,
+    });
+    if !st.post_process_enabled {
+        blocks.push(Block::Note(
+            "Turn this on to dictate with a second shortcut that sends your words to an AI model or a command-line tool, then pastes the cleaned-up text.".to_string(),
+        ));
+        return blocks;
+    }
+
+    let engine = if s.command.enabled {
+        COMMAND_ENGINE.to_string()
+    } else {
+        st.post_process_provider_id.clone()
+    };
+    let mut options = vec![choice(COMMAND_ENGINE, "Command-line tool")];
+    options.extend(
+        st.post_process_providers
+            .iter()
+            .map(|p| choice(&p.id, &p.label)),
+    );
+    let mut run = vec![Row::new(
+        "cleanup.engine",
+        "Run with",
+        popup(ChoiceKey::CleanupEngine, options, &engine),
+    )];
+    if s.command.enabled {
+        run.push(Row::new(
+            "cleanup.command",
+            "Command",
+            text(
+                TextKey::Command,
+                &s.command.command,
+                "claude -p --model haiku",
+            ),
+        ));
+        run.push(Row::new(
+            "cleanup.command_timeout",
+            "Time limit",
+            popup(
+                ChoiceKey::CommandTimeout,
+                [5u64, 10, 15, 30, 60]
+                    .iter()
+                    .map(|t| choice(&t.to_string(), &format!("{t} seconds")))
+                    .collect(),
+                &s.command.timeout_secs.to_string(),
+            ),
+        ));
+        run.push(
+            switch_row(
+                "cleanup",
+                BoolKey::CommandPrewarm,
+                "Start while you speak",
+                s,
+            )
+            .detail("Hides the tool's start-up time"),
+        );
+    } else if let Some(provider) = st.active_post_process_provider() {
+        if provider.allow_base_url_edit {
+            run.push(Row::new(
+                "cleanup.base_url",
+                "Base URL",
+                text(
+                    TextKey::BaseUrl,
+                    &provider.base_url,
+                    "http://localhost:11434/v1",
+                ),
+            ));
+        }
+        if provider.id != crate::settings::APPLE_INTELLIGENCE_PROVIDER_ID {
+            let key = st
+                .post_process_api_keys
+                .get(&provider.id)
+                .cloned()
+                .unwrap_or_default();
+            run.push(Row::new(
+                "cleanup.api_key",
+                "API key",
+                Control::Text {
+                    key: TextKey::ApiKey,
+                    value: key,
+                    placeholder: "Paste your key".to_string(),
+                    secure: true,
+                    lines: 1,
+                },
+            ));
+            let model = st
+                .post_process_models
+                .get(&provider.id)
+                .cloned()
+                .unwrap_or_default();
+            run.push(Row::new(
+                "cleanup.model_name",
+                "Model",
+                text(TextKey::ModelName, &model, "e.g. gpt-4o-mini"),
+            ));
+        }
+    }
+    blocks.push(Block::Group {
+        title: None,
+        rows: run,
+    });
+    if s.command.enabled {
+        blocks.push(Block::Note(
+            "Your prompt and words go to the command on standard input, and what it prints is pasted. Fastest: claude -p --model haiku. Codex works with codex exec --skip-git-repo-check --ephemeral -c model_reasoning_effort=low - but takes several seconds. If the command is slow, fails, or drops your words, your original text is pasted.".to_string(),
+        ));
+    }
+
+    let selected = st
+        .post_process_selected_prompt_id
+        .clone()
+        .or_else(|| st.post_process_prompts.first().map(|p| p.id.clone()))
+        .unwrap_or_default();
+    let mut prompt_rows = Vec::new();
+    if !st.post_process_prompts.is_empty() {
+        prompt_rows.push(Row::new(
+            "cleanup.prompt",
+            "Prompt",
+            popup(
+                ChoiceKey::Prompt,
+                st.post_process_prompts
+                    .iter()
+                    .map(|p| choice(&p.id, &p.name))
+                    .collect(),
+                &selected,
+            ),
+        ));
+    }
+    if let Some(prompt) = st.post_process_prompts.iter().find(|p| p.id == selected) {
+        prompt_rows.push(Row::new(
+            "cleanup.prompt_text",
+            "Instructions",
+            Control::Text {
+                key: TextKey::Prompt,
+                value: prompt.prompt.clone(),
+                placeholder: "What to do with your words. ${output} marks where they go."
+                    .to_string(),
+                secure: false,
+                lines: 7,
+            },
+        ));
+    }
+    blocks.push(Block::Group {
+        title: Some("Prompt".to_string()),
+        rows: prompt_rows,
+    });
+    blocks
+}
+
 pub fn build(s: &Snapshot, tab: Tab) -> Screen {
     let mut blocks = Vec::new();
     if let Some(notice) = &s.notice {
@@ -1192,6 +1482,7 @@ pub fn build(s: &Snapshot, tab: Tab) -> Screen {
         Tab::Home => home(s),
         Tab::History => history(s),
         Tab::Models => models(s),
+        Tab::Cleanup => cleanup(s),
         Tab::Settings => settings(s),
     });
     Screen {
@@ -1223,6 +1514,9 @@ pub fn actions(screen: &Screen) -> Vec<Action> {
                             .iter()
                             .map(|o| Action::SetChoice(*key, o.value.clone())),
                     ),
+                    Control::Text { key, value, .. } => {
+                        out.push(Action::SetText(*key, value.clone()))
+                    }
                     Control::Done(_) | Control::None => {}
                 }
             }
@@ -1316,12 +1610,15 @@ mod tests {
             }),
             mic_permission: true,
             accessibility_permission: true,
-            capturing_shortcut: false,
+            capturing_shortcut: None,
             partial_shortcut: String::new(),
             flash: None,
             notice: None,
             version: "0.10.0".into(),
             now: 1_000_000,
+            command: CommandSettings::default(),
+            secure_input: false,
+            model_loaded: false,
         }
     }
 
@@ -1642,6 +1939,93 @@ mod tests {
         assert!(has_row(&screen, "settings.auto_submit_key"));
     }
 
+    fn has_control(screen: &Screen, id: &str) -> bool {
+        rows(screen).iter().any(|r| r.id == id)
+    }
+
+    #[test]
+    fn cleanup_off_offers_only_the_switch() {
+        let s = ready();
+        let screen = build(&s, Tab::Cleanup);
+        assert!(has_control(&screen, "cleanup.post_process"));
+        assert!(!has_control(&screen, "cleanup.engine"));
+        assert!(!has_control(&screen, "cleanup.shortcut"));
+    }
+
+    #[test]
+    fn cleanup_with_a_command_shows_its_settings_not_api_keys() {
+        let mut s = ready();
+        s.settings.post_process_enabled = true;
+        s.command.enabled = true;
+        let screen = build(&s, Tab::Cleanup);
+        for id in [
+            "cleanup.shortcut",
+            "cleanup.engine",
+            "cleanup.command",
+            "cleanup.command_timeout",
+            "cleanup.command_prewarm",
+        ] {
+            assert!(has_control(&screen, id), "missing {id}");
+        }
+        assert!(!has_control(&screen, "cleanup.api_key"));
+        match &row(&screen, "cleanup.engine").control {
+            Control::Popup {
+                options, selected, ..
+            } => assert_eq!(options[*selected].value, COMMAND_ENGINE),
+            other => panic!("{other:?}"),
+        }
+        // The shortcut row records the cleanup binding, not the main one.
+        assert!(actions(&screen).contains(&Action::StartShortcutCapture(
+            "transcribe_with_post_process".into()
+        )));
+    }
+
+    #[test]
+    fn cleanup_with_a_provider_asks_for_a_hidden_api_key_and_model() {
+        let mut s = ready();
+        s.settings.post_process_enabled = true;
+        s.settings.post_process_provider_id = "openai".into();
+        let screen = build(&s, Tab::Cleanup);
+        match &row(&screen, "cleanup.api_key").control {
+            Control::Text { secure, .. } => assert!(*secure),
+            other => panic!("{other:?}"),
+        }
+        assert!(has_control(&screen, "cleanup.model_name"));
+        assert!(!has_control(&screen, "cleanup.command"));
+    }
+
+    #[test]
+    fn the_selected_prompt_is_editable() {
+        let mut s = ready();
+        s.settings.post_process_enabled = true;
+        let screen = build(&s, Tab::Cleanup);
+        if s.settings.post_process_prompts.is_empty() {
+            return;
+        }
+        match &row(&screen, "cleanup.prompt_text").control {
+            Control::Text { lines, value, .. } => {
+                assert!(*lines > 1);
+                assert_eq!(value, &s.settings.post_process_prompts[0].prompt);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn right_click_menu_items_live_in_the_popover() {
+        let mut s = ready();
+        s.secure_input = true;
+        s.model_loaded = true;
+        s.models[1].is_downloaded = true;
+        let home = build(&s, Tab::Home);
+        assert!(home
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Alert(t) if t.contains("Secure Input"))));
+        assert!(has_control(&home, "home.model"));
+        assert!(actions(&build(&s, Tab::Models)).contains(&Action::UnloadModel));
+    }
+
     #[test]
     fn progress_changes_alone_are_detected() {
         let mut a = ready();
@@ -1674,7 +2058,7 @@ mod tests {
     #[test]
     fn capturing_a_shortcut_shows_what_is_held() {
         let mut s = ready();
-        s.capturing_shortcut = true;
+        s.capturing_shortcut = Some("transcribe".into());
         s.partial_shortcut = "command+shift".into();
         let screen = build(&s, Tab::Settings);
         let r = row(&screen, "settings.shortcut");
@@ -1691,7 +2075,7 @@ mod tests {
         assert_eq!(r.detail.as_deref(), Some("Needs Accessibility access"));
         let acts = actions(&screen);
         assert!(acts.contains(&Action::RequestAccessibility));
-        assert!(!acts.contains(&Action::StartShortcutCapture));
+        assert!(!acts.contains(&Action::StartShortcutCapture("transcribe".into())));
     }
 
     #[test]
@@ -1715,14 +2099,15 @@ mod tests {
     #[test]
     fn a_custom_shortcut_can_be_reset() {
         let mut s = ready();
-        assert!(!actions(&build(&s, Tab::Settings)).contains(&Action::ResetShortcut));
+        assert!(!actions(&build(&s, Tab::Settings))
+            .contains(&Action::ResetShortcut("transcribe".into())));
         s.settings
             .bindings
             .get_mut("transcribe")
             .unwrap()
             .current_binding = "f13".into();
         let screen = build(&s, Tab::Settings);
-        assert!(actions(&screen).contains(&Action::ResetShortcut));
+        assert!(actions(&screen).contains(&Action::ResetShortcut("transcribe".into())));
         assert!(screen.header.subtitle.contains("F13"));
     }
 

@@ -6,7 +6,7 @@
 //! an idle Handy holds no UI beyond the status item.
 
 use super::view::{
-    Action, Block, BoolKey, ButtonSpec, ChoiceKey, Control, Phase, Row, Screen, Tab,
+    Action, Block, BoolKey, ButtonSpec, ChoiceKey, Control, Phase, Row, Screen, Tab, TextKey,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -40,6 +40,7 @@ enum Slot {
     Fixed(Action),
     Switch(BoolKey),
     Popup(ChoiceKey, Vec<String>),
+    Text(TextKey),
     Tabs,
 }
 
@@ -158,6 +159,10 @@ fn on_control(sender: &NSView) {
             Slot::Popup(key, values) => {
                 let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
                 Action::SetChoice(*key, values.get(index as usize)?.clone())
+            }
+            Slot::Text(key) => {
+                let value: Retained<NSString> = unsafe { msg_send![sender, stringValue] };
+                Action::SetText(*key, value.to_string())
             }
             Slot::Tabs => {
                 let index: isize = unsafe { msg_send![sender, selectedSegment] };
@@ -367,6 +372,14 @@ pub fn refresh(app: &AppHandle) {
 fn interacting() -> bool {
     if NSEvent::pressedMouseButtons() != 0 {
         return true;
+    }
+    // Typing in a text field: a redraw would throw away what's typed.
+    if let Some(responder) = popover_window().and_then(|w| w.firstResponder()) {
+        let is_editor: bool =
+            unsafe { msg_send![&*responder, isKindOfClass: objc2::class!(NSTextView)] };
+        if is_editor {
+            return true;
+        }
     }
     let mode = objc2_foundation::NSRunLoop::currentRunLoop().currentMode();
     let tracking = unsafe { objc2_app_kit::NSEventTrackingRunLoopMode };
@@ -602,10 +615,78 @@ impl Builder<'_> {
         v
     }
 
+    fn text_field(
+        &mut self,
+        id: &str,
+        title: &str,
+        key: TextKey,
+        value: &str,
+        placeholder: &str,
+        secure: bool,
+        lines: u16,
+    ) -> Retained<NSView> {
+        let mtm = self.mtm;
+        let field: Retained<NSTextField> = if secure {
+            let f = objc2_app_kit::NSSecureTextField::new(mtm);
+            Retained::into_super(f)
+        } else {
+            NSTextField::new(mtm)
+        };
+        field.setStringValue(&ns(value));
+        field.setPlaceholderString(Some(&ns(placeholder)));
+        field.setEditable(true);
+        field.setSelectable(true);
+        field.setBezeled(true);
+        field.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        no_autoresize(&field);
+        unsafe {
+            let cell: *mut AnyObject = msg_send![&*field, cell];
+            // Save when focus leaves the field, not only on Return.
+            let _: () = msg_send![cell, setSendsActionOnEndEditing: true];
+            if lines > 1 {
+                let _: () = msg_send![cell, setWraps: true];
+                let _: () = msg_send![cell, setScrollable: false];
+            } else {
+                let _: () = msg_send![cell, setScrollable: true];
+            }
+        }
+        if lines > 1 {
+            field.setUsesSingleLineMode(false);
+            field.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+            activate(&[field
+                .heightAnchor()
+                .constraintEqualToConstant(f64::from(lines) * 16.0 + 8.0)]);
+        } else {
+            field.setBezelStyle(objc2_app_kit::NSTextFieldBezelStyle::RoundedBezel);
+            field.setUsesSingleLineMode(true);
+            activate(&[field.widthAnchor().constraintEqualToConstant(200.0)]);
+        }
+        let v: Retained<NSView> = upcast(&*field);
+        self.wire(&v, Slot::Text(key));
+        set_identifier(&v, &format!("{id}.field"));
+        set_label(&v, title);
+        v
+    }
+
     fn control(&mut self, row: &Row) -> Option<Retained<NSView>> {
         let mtm = self.mtm;
         let view: Retained<NSView> = match &row.control {
             Control::None => return None,
+            Control::Text {
+                key,
+                value,
+                placeholder,
+                secure,
+                lines,
+            } => self.text_field(
+                &row.id,
+                &row.title,
+                *key,
+                value,
+                placeholder,
+                *secure,
+                *lines,
+            ),
             Control::Switch { key, on } => {
                 let s = NSSwitch::new(mtm);
                 s.setState(if *on { 1 } else { 0 });
@@ -711,11 +792,17 @@ impl Builder<'_> {
             250.0,
             objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
         );
+        // A multi-line field takes the full width under its title.
+        let tall = matches!(row.control, Control::Text { lines, .. } if lines > 1);
         let mut parts: Vec<Retained<NSView>> = vec![upcast(&*texts)];
         if let Some(c) = self.control(row) {
             parts.push(c);
         }
-        let h = stack(mtm, false, 8.0, &parts);
+        let h = if tall {
+            column(mtm, 6.0, 10.0, &parts)
+        } else {
+            stack(mtm, false, 8.0, &parts)
+        };
         h.setEdgeInsets(NSEdgeInsets {
             top: 7.0,
             left: 10.0,
@@ -848,7 +935,7 @@ fn rebuild(app: &AppHandle, mtm: MainThreadMarker) {
 pub fn prebuild_other_tabs(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        for tab in [Tab::Home, Tab::History, Tab::Models, Tab::Settings] {
+        for tab in Tab::ALL {
             std::thread::sleep(Duration::from_millis(30));
             let app2 = app.clone();
             let _ = app.run_on_main_thread(move || {
@@ -924,6 +1011,24 @@ fn prepare(app: &AppHandle, mtm: MainThreadMarker, tab: Tab, show: bool) {
     });
 }
 
+/// Debug builds: writes what a view draws to a PNG, for checking layouts
+/// and taking screenshots (a popover isn't a window screenshot tools see).
+#[cfg(debug_assertions)]
+fn snapshot_png(view: &NSView, path: &str) {
+    let rect = view.bounds();
+    let Some(rep) = view.bitmapImageRepForCachingDisplayInRect(rect) else {
+        return;
+    };
+    view.cacheDisplayInRect_toBitmapImageRep(rect, &rep);
+    let props = objc2_foundation::NSDictionary::new();
+    let data = unsafe {
+        rep.representationUsingType_properties(objc2_app_kit::NSBitmapImageFileType::PNG, &props)
+    };
+    if let Some(data) = data {
+        data.writeToFile_atomically(&ns(path), true);
+    }
+}
+
 /// Puts a built tab on screen.
 fn swap_in(ui: &mut Ui, tab: Tab) {
     let Some(tree) = ui.trees.get(&tab) else {
@@ -938,6 +1043,10 @@ fn swap_in(ui: &mut Ui, tab: Tab) {
     ui.popover.setContentSize(NSSize::new(WIDTH, tree.height));
     ui.root.layoutSubtreeIfNeeded();
     ui.shown = Some(tab);
+    #[cfg(debug_assertions)]
+    if let Ok(dir) = std::env::var("HANDYBAR_SNAPSHOT_DIR") {
+        snapshot_png(&ui.root, &format!("{dir}/{tab:?}.png"));
+    }
 }
 
 fn build_tree(mtm: MainThreadMarker, target: &Target, screen: Screen, generation: isize) -> Tree {

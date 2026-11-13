@@ -582,6 +582,14 @@ fn apply_on_main(app: &AppHandle) {
     }
 
     let mut menu_ok = false;
+    // Handy Bar: the popover replaces the menu, so the icon carries none.
+    #[cfg(target_os = "macos")]
+    let menu_changed = if crate::menubar::enabled() {
+        menu_ok = true;
+        false
+    } else {
+        menu_changed
+    };
     if menu_changed {
         match build_menu(app, &desired.menu) {
             Ok((menu, tooltip)) => match tray.set_menu(Some(menu)) {

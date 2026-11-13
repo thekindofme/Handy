@@ -441,7 +441,18 @@ pub(crate) async fn process_transcription_output(
 
     if post_process {
         // A reply that's blank once cleaned is no better than none.
-        let outcome = match post_process_transcription(&settings, &final_text).await {
+        // Handy Bar: a command-line tool, when selected, replaces the provider.
+        let raw = match crate::cleanup_command::run_if_selected(app, &final_text).await {
+            Some(crate::cleanup_command::CommandOutcome::Done(text)) => {
+                PostProcessOutcome::Done(text)
+            }
+            Some(crate::cleanup_command::CommandOutcome::Failed(why)) => {
+                warn!("Cleanup command failed: {why}");
+                PostProcessOutcome::Failed
+            }
+            None => post_process_transcription(&settings, &final_text).await,
+        };
+        let outcome = match raw {
             PostProcessOutcome::Done(text) => non_blank_post_processed_text(text)
                 .map_or(PostProcessOutcome::Failed, PostProcessOutcome::Done),
             outcome => outcome,
@@ -512,6 +523,10 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string();
         RECORDING_SESSION.fetch_add(1, Ordering::SeqCst);
+        // Handy Bar: start a command-line cleanup tool now, while the user speaks.
+        if self.post_process {
+            crate::cleanup_command::prewarm(app);
+        }
         let tray_started = Instant::now();
         set_tray_state(app, TrayIconState::Recording);
         let tray_elapsed = tray_started.elapsed();
