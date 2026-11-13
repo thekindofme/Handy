@@ -10,7 +10,7 @@
 // pass/fail count, so a screen recording of a run is readable on its own.
 //
 // Build: swiftc -O -o e2e HandyMenubarE2E.swift
-// Run:   ./e2e [--phase ui|dictation|all] [--app "/path/Handy Menubar.app"]
+// Run:   ./e2e [--phase ui|dictation|all] [--app "/path/Handy Bar.app"]
 
 import AppKit
 import ApplicationServices
@@ -18,11 +18,11 @@ import Foundation
 
 // MARK: - Configuration
 
-let bundleId = "com.pais.handy.menubar"
+let bundleId = "com.thekindofme.handybar"
 let supportDir = NSHomeDirectory() + "/Library/Application Support/\(bundleId)"
 let settingsPath = supportDir + "/settings_store.json"
 var appPath = FileManager.default.currentDirectoryPath
-    + "/src-tauri/target/debug/bundle/macos/Handy Menubar.app"
+    + "/src-tauri/target/debug/bundle/macos/Handy Bar.app"
 var phase = "all"
 var keepSettings = false
 var only: String? = nil
@@ -457,7 +457,7 @@ func clickControl(_ id: String) -> String? {
 }
 
 func launch(fresh: Bool, viaOpen: Bool) {
-    _ = sh("pkill -f 'Handy Menubar.app/Contents/MacOS/handy'; sleep 1")
+    _ = sh("pkill -f 'Handy Bar.app/Contents/MacOS/handy'; sleep 1")
     if fresh {
         // Settings and history only; downloaded models stay.
         _ = sh("rm -f '\(settingsPath)' '\(supportDir)/history.db'*; rm -rf '\(supportDir)/recordings'")

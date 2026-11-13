@@ -1,7 +1,8 @@
-# Handy menu bar UI (macOS)
+# Handy Bar: the menu bar UI (macOS)
 
-This fork replaces Handy's WebView settings window on macOS with a native
-menu bar popover drawn by AppKit from Rust. Windows and Linux are unchanged.
+Handy Bar, an unofficial fork of [Handy](https://github.com/cjpais/handy),
+replaces Handy's WebView settings window on macOS with a native menu bar
+popover drawn by AppKit from Rust. Windows and Linux are unchanged.
 
 ![The three directions](designs.png)
 
@@ -49,7 +50,14 @@ src-tauri/src/menubar/
   capture.rs  pure: handy-keys events → one shortcut
   mod.rs      gathers state, runs actions, listens for backend events
   appkit.rs   draws a Screen with AppKit (objc2) inside an NSPopover
+  hud.rs      the recording indicator: a non-activating NSPanel with live
+              mic levels and, with "Levels + live text", the words as you speak
 ```
+
+Each tab's views are kept while the popover is open (the other tabs are
+built right after it opens), so switching tabs is a swap. A redraw happens
+only when what a tab shows has changed; download progress moves the bar in
+place; redraws wait while a click or menu is in progress.
 
 The UI calls the same Rust functions the WebView's Tauri commands call
 (`shortcut::change_*_setting`, `commands::models::*`, `commands::history::*`),
@@ -63,7 +71,11 @@ so behaviour matches upstream exactly.
   icon state and language list, redraw the popover when the tray updates).
 - The React frontend is untouched and still ships. Set `HANDY_WEBVIEW_UI=1` to
   run the upstream WebView UI.
-- To update from upstream: `git fetch upstream && git rebase upstream/main`.
+- `src-tauri/tauri.macos.conf.json` gives the macOS build its own name,
+  bundle id and icon without editing upstream's `tauri.conf.json`.
+- To update from upstream: `scripts/menubar/sync-upstream.sh` (merges
+  `upstream/main` and runs the menu bar tests). A weekly workflow opens a
+  pull request when upstream has new commits.
 
 ## Not ported (yet)
 
@@ -72,7 +84,7 @@ These still need the WebView UI (`HANDY_WEBVIEW_UI=1`):
 - Post-processing (LLM provider, API key, prompts)
 - Custom words and filler-word lists
 - Debug, log level, keyboard implementation and paste-delay tuning
-- Translations: the popover's strings are English only for now
+- Translations: the popover's and indicator's strings are English only for now
 
 ## Tests
 

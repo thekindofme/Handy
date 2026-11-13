@@ -1388,12 +1388,11 @@ pub fn update_checks_forced_disabled() -> bool {
     use std::sync::OnceLock;
     static IS_UPDATER_DISABLED: OnceLock<bool> = OnceLock::new();
     *IS_UPDATER_DISABLED.get_or_init(|| {
-        // Fork: the native menu bar UI has no updater (updates run in the
-        // WebView), and upstream's releases would replace this build.
+        // Handy Bar (macOS fork): upstream's updater would replace this
+        // build with upstream's, and the menu bar UI has no updater anyway.
         #[cfg(target_os = "macos")]
-        if crate::menubar::enabled() {
-            return true;
-        }
+        return true;
+        #[cfg(not(target_os = "macos"))]
         utils::env_flag_enabled("HANDY_DISABLE_UPDATER")
     })
 }

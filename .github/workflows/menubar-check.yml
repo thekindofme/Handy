@@ -1,0 +1,34 @@
+# Fork-only: checks the Handy Bar menu bar code on macOS. Upstream's own
+# workflows need Handy's signing secrets, so this is the fork's CI.
+name: Handy Bar check
+
+on:
+  push:
+    branches: [menubar-native]
+  pull_request:
+    branches: [menubar-native]
+  workflow_dispatch:
+
+jobs:
+  menubar:
+    if: github.repository != 'cjpais/handy'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Formatting
+        working-directory: src-tauri
+        run: rustfmt --check --edition 2021 src/menubar/*.rs
+      - name: Menu bar tests
+        working-directory: src-tauri
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+        run: |
+          mkdir -p ../dist
+          cargo test --lib menubar

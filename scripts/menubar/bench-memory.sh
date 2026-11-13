@@ -6,9 +6,9 @@
 # process that appeared after launch (a WebView's content, networking and GPU
 # helpers run as separate processes).
 #
-# Usage: scripts/menubar/bench-memory.sh ["/path/Handy Menubar.app"]
+# Usage: scripts/menubar/bench-memory.sh ["/path/Handy Bar.app"]
 set -e
-APP=${1:-"$(cd "$(dirname "$0")/../.." && pwd)/src-tauri/target/debug/bundle/macos/Handy Menubar.app"}
+APP=${1:-"$(cd "$(dirname "$0")/../.." && pwd)/src-tauri/target/debug/bundle/macos/Handy Bar.app"}
 BIN="$APP/Contents/MacOS/handy"
 cd "$(dirname "$0")/../../src-tauri"
 
@@ -18,7 +18,7 @@ rss_mb() { ps -o rss= -p "$1" | awk '{printf "%.1f", $1/1024}'; }
 
 measure() {
   local mode=$1
-  pkill -f 'Handy Menubar.app/Contents/MacOS/handy' || true
+  pkill -f 'Handy Bar.app/Contents/MacOS/handy' || true
   sleep 1
   local before=$(webkit_pids)
   if [[ $mode == webview ]]; then
@@ -27,7 +27,7 @@ measure() {
     "$BIN" >/dev/null 2>&1 &
   fi
   sleep 8
-  local pid=$(pgrep -f 'Handy Menubar.app/Contents/MacOS/handy' | head -1)
+  local pid=$(pgrep -f 'Handy Bar.app/Contents/MacOS/handy' | head -1)
   # Open the UI the way a person would (second launch = "show the app").
   "$BIN" >/dev/null 2>&1 || true
   sleep 4
@@ -40,7 +40,7 @@ measure() {
   done
   printf '%-8s handy RSS %7s MB  footprint %7s MB  + %d WebKit procs %6.1f MB  = total RSS %7.1f MB\n' \
     $mode $main_rss ${main_fp:-?} $extra_n $(( extra_rss / 1024.0 )) $(( main_rss + extra_rss / 1024.0 ))
-  pkill -f 'Handy Menubar.app/Contents/MacOS/handy' || true
+  pkill -f 'Handy Bar.app/Contents/MacOS/handy' || true
   sleep 1
 }
 
