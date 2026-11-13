@@ -23,6 +23,12 @@ What's different from Handy:
 - **Live words in the indicator.** With "Levels + live text" and a streaming
   model (such as Parakeet Unified), the indicator shows your words as you
   speak.
+- **AI cleanup with any command-line tool.** Besides Handy's AI providers,
+  cleanup can run a command such as `claude -p --model haiku` or
+  `codex exec`, using the subscription you already have. The command starts
+  when you press the cleanup shortcut, so its start-up overlaps your
+  speaking, and if it's slow, fails, or drops your words, your original text
+  is pasted.
 
 Windows and Linux builds are unchanged from Handy. This fork is not
 affiliated with or endorsed by the Handy project; please report Handy Bar
@@ -56,11 +62,14 @@ To run Handy's original WebView interface from the same build, start it with
 ## Status
 
 Working: dictation, live text, the recording indicator, model downloads,
-history, microphone and output selection, shortcuts, and most settings.
+history, microphone and output selection, shortcuts, AI cleanup (Handy's
+providers or a command-line tool), and most settings. Either click on the
+menu bar icon opens the popover; there's no separate right-click menu.
 
-Not in the menu bar yet (use `HANDY_WEBVIEW_UI=1` for now): AI
-post-processing, custom words, filler-word lists, debug tuning, and
-translations (the menu bar UI is English only).
+Not in the menu bar yet (use `HANDY_WEBVIEW_UI=1` for now): adding or
+deleting cleanup prompts, fetching a provider's model list, custom words,
+filler-word lists, debug tuning, and translations (the menu bar UI is
+English only).
 
 Update checks are turned off: Handy's updater would replace Handy Bar with
 upstream Handy.

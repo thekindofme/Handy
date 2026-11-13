@@ -20,16 +20,17 @@ Handy into the menu bar. All three drop the WebView.
 | macOS fit | Good | Matches common menu bar apps (Tailscale, iStat Menus, 1Password mini) | Good for tiles, poor overall |
 
 **Picked: B.** It is the only design that fits every feature in the menu bar
-while staying fully native. It keeps Handy's upstream quick menu one click
-away (right click), and it costs nothing when closed.
+while staying fully native. It costs nothing when closed. (It first kept Handy's
+right-click menu as well; that menu's items now live in the popover, so
+there is one UI.)
 
 ## macOS practices followed
 
 - **Accessory app** (`ActivationPolicy::Accessory`): no Dock icon and no app
   switcher entry. Handy is in the menu bar only.
 - **Transient `NSPopover`** anchored to the status item. It closes on an
-  outside click or Esc, and ⌘Q in the popover quits. Left click opens it,
-  right click keeps the classic menu.
+  outside click or Esc, and ⌘Q in the popover quits. Either click opens it;
+  everything the old right-click menu offered is in the popover.
 - **Native controls only**: `NSSwitch`, `NSPopUpButton`, `NSSegmentedControl`,
   `NSProgressIndicator`, SF Symbols and system colors. Dark mode, accent
   color, vibrancy, Increase Contrast and Reduce Transparency all work for free.
@@ -81,7 +82,8 @@ so behaviour matches upstream exactly.
 
 These still need the WebView UI (`HANDY_WEBVIEW_UI=1`):
 
-- Post-processing (LLM provider, API key, prompts)
+- Adding or deleting post-processing prompts, and fetching a provider's
+  model list (the Cleanup tab edits and picks existing prompts)
 - Custom words and filler-word lists
 - Debug, log level, keyboard implementation and paste-delay tuning
 - Translations: the popover's and indicator's strings are English only for now
