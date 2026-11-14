@@ -153,7 +153,14 @@ fn on_control(sender: &NSView) {
         return;
     }
     let action = UI.with(|cell| {
-        let ui = cell.borrow();
+        // A control can fire while its view tree is being replaced (a text
+        // field "ends editing" as it leaves the window). Edits are flushed
+        // before every teardown (`end_editing`), so anything arriving now is
+        // a duplicate: drop it rather than re-enter the UI state.
+        let Ok(ui) = cell.try_borrow() else {
+            log::debug!("Menu bar: ignored a control action during a redraw");
+            return None;
+        };
         let ui = ui.as_ref()?;
         let tree = ui.trees.get(&ui.shown?)?;
         if tag / GEN_STRIDE != tree.generation {
@@ -173,6 +180,12 @@ fn on_control(sender: &NSView) {
             Slot::Search => return None,
             Slot::Text(key) => {
                 let value: Retained<NSString> = unsafe { msg_send![sender, stringValue] };
+                if *key == TextKey::NewCustomWord {
+                    // An "add" field: empty it so the same words aren't
+                    // added again when editing ends.
+                    let empty = ns("");
+                    let _: () = unsafe { msg_send![sender, setStringValue: &*empty] };
+                }
                 Action::SetText(*key, value.to_string())
             }
             Slot::Tabs => {
@@ -270,9 +283,9 @@ fn ensure_ui(app: &AppHandle, mtm: MainThreadMarker) {
 
 fn is_shown() -> bool {
     UI.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .is_some_and(|ui| ui.popover.isShown())
+        cell.try_borrow()
+            .ok()
+            .is_some_and(|ui| ui.as_ref().is_some_and(|ui| ui.popover.isShown()))
     })
 }
 
@@ -307,6 +320,20 @@ pub fn toggle(app: &AppHandle) {
     }
 }
 
+/// Ends text editing in the popover, so a field's typed value is saved
+/// (its action fires now) before the views around it are replaced.
+/// Must be called with the UI state not borrowed.
+fn end_editing() {
+    if let Some(window) = popover_window() {
+        let editing = window
+            .firstResponder()
+            .is_some_and(|r| unsafe { msg_send![&*r, isKindOfClass: objc2::class!(NSTextView)] });
+        if editing {
+            window.makeFirstResponder(None);
+        }
+    }
+}
+
 fn popover_window() -> Option<Retained<objc2_app_kit::NSWindow>> {
     popover()
         .and_then(|p| p.contentViewController())
@@ -314,7 +341,11 @@ fn popover_window() -> Option<Retained<objc2_app_kit::NSWindow>> {
 }
 
 fn popover() -> Option<Retained<NSPopover>> {
-    UI.with(|cell| cell.borrow().as_ref().map(|ui| ui.popover.clone()))
+    UI.with(|cell| {
+        cell.try_borrow()
+            .ok()
+            .and_then(|ui| ui.as_ref().map(|ui| ui.popover.clone()))
+    })
 }
 
 pub fn show(app: &AppHandle) {
@@ -366,6 +397,7 @@ fn close() {
 
 /// Drops the view tree so a closed popover holds no memory beyond itself.
 fn release_views() {
+    end_editing();
     UI.with(|cell| {
         let Ok(mut guard) = cell.try_borrow_mut() else {
             return;
@@ -1135,8 +1167,27 @@ fn prepare(app: &AppHandle, mtm: MainThreadMarker, tab: Tab, show: bool) {
     let snapshot_took = started.elapsed();
     let screen = super::view::build(&snapshot, tab);
 
+    // Replacing what's on screen? Save any edit in progress first.
+    let replaces_visible = UI.with(|cell| {
+        cell.try_borrow()
+            .ok()
+            .and_then(|ui| {
+                ui.as_ref().map(|ui| {
+                    let on_screen = ui.shown == Some(tab);
+                    let unchanged = ui.trees.get(&tab).is_some_and(|t| t.screen == screen);
+                    (on_screen && !unchanged) || (show && !on_screen)
+                })
+            })
+            .unwrap_or(false)
+    });
+    if replaces_visible {
+        end_editing();
+    }
+
     UI.with(|cell| {
-        let mut guard = cell.borrow_mut();
+        let Ok(mut guard) = cell.try_borrow_mut() else {
+            return;
+        };
         let Some(ui) = guard.as_mut() else { return };
         let fresh = ui.trees.get(&tab).is_some_and(|t| t.screen == screen);
         let progress_only = !fresh

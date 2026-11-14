@@ -167,6 +167,8 @@ pub enum TextKey {
     BaseUrl,
     ModelName,
     Prompt,
+    /// Words typed into the Custom words "Add" field (comma-separated).
+    NewCustomWord,
 }
 
 #[cfg(test)]
@@ -224,6 +226,7 @@ pub enum Action {
     /// "model:<id>").
     ConfirmDelete(String),
     OpenUrl(String),
+    RemoveCustomWord(String),
     OpenRecordingsFolder,
     OpenLogs,
     Quit,
@@ -1446,11 +1449,73 @@ fn settings(s: &Snapshot) -> Vec<Block> {
     vec![
         group("Audio", audio),
         group("Dictation", dictation),
+        group("Custom words", custom_words_rows(s)),
         group("Pasting", pasting),
         group("History", history),
         group("General", general),
         group("About", about),
     ]
+}
+
+/// Handy's custom words: names and terms that similar-sounding words are
+/// corrected to (and, for models that support it, a vocabulary hint).
+fn custom_words_rows(s: &Snapshot) -> Vec<Row> {
+    let mut rows: Vec<Row> = s
+        .settings
+        .custom_words
+        .iter()
+        .enumerate()
+        .map(|(i, word)| {
+            Row::new(
+                format!("settings.custom_word.{i}"),
+                word.clone(),
+                Control::Buttons(vec![ButtonSpec {
+                    icon: Some("minus.circle".into()),
+                    ..button(
+                        format!("settings.custom_word.{i}.remove"),
+                        &format!("Remove {word}"),
+                        Action::RemoveCustomWord(word.clone()),
+                    )
+                }]),
+            )
+        })
+        .collect();
+    rows.push(
+        Row::new(
+            "settings.custom_words.add",
+            "Add",
+            Control::Text {
+                key: TextKey::NewCustomWord,
+                value: String::new(),
+                placeholder: "Name or term".to_string(),
+                secure: false,
+                lines: 1,
+                wide: false,
+                monospace: false,
+            },
+        )
+        .detail(if s.settings.custom_words.is_empty() {
+            "Names and terms to spell your way"
+        } else {
+            "Separate several with commas"
+        }),
+    );
+    rows
+}
+
+/// Adds `input` (comma-separated) to `words`, skipping blanks and words
+/// already there (any case). Returns the new list and what was skipped.
+pub fn add_custom_words(words: &[String], input: &str) -> (Vec<String>, Vec<String>) {
+    let mut out = words.to_vec();
+    let mut skipped = Vec::new();
+    for w in input.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        if out.iter().any(|x| x.eq_ignore_ascii_case(w)) {
+            skipped.push(w.to_string());
+        } else {
+            out.push(w.to_string());
+        }
+    }
+    (out, skipped)
 }
 
 /// The whole popover for `tab`.
@@ -2463,6 +2528,7 @@ mod tests {
             vec![
                 "Audio",
                 "Dictation",
+                "Custom words",
                 "Pasting",
                 "History",
                 "General",
@@ -2475,6 +2541,26 @@ mod tests {
         assert!(actions(&screen).contains(&Action::OpenUrl(
             "https://handybar.yasithfernando.com".into()
         )));
+    }
+
+    #[test]
+    fn custom_words_are_listed_removable_and_addable() {
+        let mut s = ready();
+        s.settings.custom_words = vec!["Handy".into(), "Kubernetes".into()];
+        let screen = build(&s, Tab::Settings);
+        assert_eq!(row(&screen, "settings.custom_word.1").title, "Kubernetes");
+        assert!(actions(&screen).contains(&Action::RemoveCustomWord("Handy".into())));
+        assert!(matches!(
+            row(&screen, "settings.custom_words.add").control,
+            Control::Text {
+                key: TextKey::NewCustomWord,
+                ..
+            }
+        ));
+        let (words, skipped) =
+            add_custom_words(&s.settings.custom_words, " cjpais, handy ,  , Tauri");
+        assert_eq!(words, vec!["Handy", "Kubernetes", "cjpais", "Tauri"]);
+        assert_eq!(skipped, vec!["handy"]);
     }
 
     #[test]

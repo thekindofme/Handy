@@ -640,6 +640,17 @@ fn set_text(app: &AppHandle, key: view::TextKey, value: String) -> Result<(), St
         TextKey::ModelName => {
             sc::change_post_process_model_setting(a, active_provider_id(app), value.trim().into())
         }
+        TextKey::NewCustomWord => {
+            let current = settings::get_settings(app).custom_words;
+            let (words, skipped) = view::add_custom_words(&current, &value);
+            if words.len() != current.len() {
+                sc::update_custom_words(a, words)?;
+            }
+            if !skipped.is_empty() {
+                flash(app, format!("Already in your list: {}", skipped.join(", ")));
+            }
+            Ok(())
+        }
         TextKey::Prompt => {
             let st = settings::get_settings(app);
             let id = st
@@ -1057,6 +1068,11 @@ pub(crate) fn perform(app: &AppHandle, action: Action) {
                 request_refresh(&app2);
             });
             Ok(())
+        }
+        Action::RemoveCustomWord(word) => {
+            let mut words = settings::get_settings(app).custom_words;
+            words.retain(|w| *w != word);
+            crate::shortcut::update_custom_words(app.clone(), words)
         }
         Action::OpenUrl(url) => {
             // Only the app's own links reach here (see view.rs).
