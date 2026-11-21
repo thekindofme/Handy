@@ -29,6 +29,8 @@ jobs:
     env:
       BRANCH: menubar-native
       GH_TOKEN: ${{ github.token }}
+      # gh would otherwise pick the `upstream` remote (cjpais/handy).
+      GH_REPO: ${{ github.repository }}
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
