@@ -74,9 +74,29 @@ so behaviour matches upstream exactly.
   run the upstream WebView UI.
 - `src-tauri/tauri.macos.conf.json` gives the macOS build its own name,
   bundle id and icon without editing upstream's `tauri.conf.json`.
-- To update from upstream: `scripts/menubar/sync-upstream.sh` (merges
-  `upstream/main` and runs the menu bar tests). A weekly workflow opens a
-  pull request when upstream has new commits.
+- To update from upstream by hand: `scripts/menubar/sync-upstream.sh`
+  (merges `upstream/main` and runs the menu bar tests).
+
+### Automatic upstream sync
+
+1. **Mondays 03:00 UTC, GitHub Actions** (`.github/workflows/menubar-sync-upstream.yml`,
+   plain code, no AI): merges `cjpais/handy` `main` into `menubar-native` on a
+   macOS runner and runs rustfmt plus the menu bar, cleanup, paste and
+   clipboard tests. A clean merge that passes is pushed to `menubar-native`.
+2. Anything else (a conflict, failing checks, or a merge the workflow token
+   can't push because upstream changed `.github/workflows`) opens or updates
+   an issue labelled **`upstream-sync`** with the conflicting files or the
+   failing test output.
+3. **Mondays 06:00 UTC, a Claude routine** ("Handy Bar: finish upstream sync",
+   claude.ai/code/routines) only acts when there's something left: it redoes
+   the merge on a `sync/upstream-<sha>` branch, resolves conflicts by keeping
+   upstream's code and re-applying the Handy Bar hooks, opens a pull
+   request, waits for the macOS "Handy Bar check", merges it only when it
+   passes, and closes the issue. It never pushes to `menubar-native`
+   directly. If it can't finish, it says what's left on the issue.
+
+Both can be started by hand: the workflow from the Actions tab ("Run
+workflow"), the routine with "Run now" on its page.
 
 ## Not ported (yet)
 

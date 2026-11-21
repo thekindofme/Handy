@@ -93,7 +93,11 @@ upstream files, so upstream changes merge cleanly.
 scripts/menubar/sync-upstream.sh
 ```
 
-A weekly workflow also opens a pull request when Handy has new commits.
+Updates are automatic: every Monday a GitHub Action merges Handy's latest
+changes and pushes them when Handy Bar's tests pass. When a merge conflicts
+or breaks something, it opens an `upstream-sync` issue, and a scheduled
+Claude routine resolves it through a tested pull request. See
+[docs/menubar](../docs/menubar/README.md#automatic-upstream-sync).
 Design notes and architecture are in [docs/menubar](../docs/menubar/README.md).
 
 ## Credits and license
