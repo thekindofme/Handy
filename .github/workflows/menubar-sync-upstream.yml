@@ -1,6 +1,10 @@
-# Fork-only: once a week, merge the latest Handy (cjpais/handy) into the
-# menu bar branch and open a pull request with the result. A merge that
-# conflicts still gets a PR (with the conflict list) so nothing is missed.
+# Fork-only: keeps Handy Bar up to date with Handy (cjpais/handy).
+#
+# Every Monday this merges upstream's main into menubar-native and tests the
+# result on macOS. A clean merge that passes the tests is pushed straight to
+# menubar-native. Anything else (a conflict, failing checks, or a merge the
+# token can't push) becomes an issue labelled `upstream-sync` for the weekly
+# Claude routine (or a person) to finish: see docs/menubar/README.md.
 name: Sync upstream Handy
 
 on:
@@ -10,16 +14,22 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 
 jobs:
   sync:
     # Never runs in upstream's repository.
     if: github.repository != 'cjpais/handy'
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
+    timeout-minutes: 90
     env:
       BRANCH: menubar-native
       GH_TOKEN: ${{ github.token }}
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -32,44 +42,94 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/cjpais/handy.git
-          git fetch upstream main
+          git fetch --no-tags upstream main
           behind=$(git rev-list --count HEAD..upstream/main)
           echo "behind=$behind" >> "$GITHUB_OUTPUT"
-          [ "$behind" = 0 ] && exit 0
-          sync="sync/upstream-$(date +%Y-%m-%d)"
-          echo "sync=$sync" >> "$GITHUB_OUTPUT"
-          git checkout -b "$sync"
-          if git merge --no-edit upstream/main; then
-            echo "conflicts=" >> "$GITHUB_OUTPUT"
+          if [ "$behind" = 0 ]; then
+            echo "Already up to date."
+            exit 0
+          fi
+          upstream_sha=$(git rev-parse --short upstream/main)
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          if git merge --no-edit -m "Merge upstream Handy ($upstream_sha)" upstream/main; then
+            echo "result=merged" >> "$GITHUB_OUTPUT"
           else
-            # Push upstream's tip as-is so the PR shows the conflicts to resolve.
-            files=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
-            echo "conflicts=$files" >> "$GITHUB_OUTPUT"
+            # File names come from upstream: written to a file, never
+            # interpolated into a script.
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
             git merge --abort
-            git reset --hard upstream/main
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
           fi
-          git push --force origin "$sync"
 
-      - name: Open pull request
-        if: steps.merge.outputs.behind != '0'
-        # Step outputs carry upstream file names: pass them as environment
-        # variables, never interpolated into the script.
-        env:
-          SYNC: ${{ steps.merge.outputs.sync }}
-          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
-          BEHIND: ${{ steps.merge.outputs.behind }}
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: steps.merge.outputs.result == 'merged'
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: steps.merge.outputs.result == 'merged'
+        with:
+          workspaces: src-tauri
+
+      - name: Test the merge
+        id: test
+        if: steps.merge.outputs.result == 'merged'
+        working-directory: src-tauri
         run: |
-          sync="$SYNC"
-          conflicts="$CONFLICTS"
-          body="Merges $BEHIND new commit(s) from cjpais/handy.
+          mkdir -p ../dist
+          set -o pipefail
+          {
+            rustfmt --check --edition 2021 src/menubar/*.rs src/cleanup_command.rs src/cleanup_context.rs
+            cargo test --lib -- menubar cleanup_command cleanup_context paste_tx clipboard
+          } 2>&1 | tee "$RUNNER_TEMP/test.log"
+        continue-on-error: true
 
-          Run \`scripts/menubar/sync-upstream.sh\` locally to test, or check the macOS build on this PR."
-          if [ -n "$conflicts" ]; then
-            body="$body
+      - name: Push a passing merge
+        id: push
+        if: steps.merge.outputs.result == 'merged' && steps.test.outcome == 'success'
+        continue-on-error: true
+        run: |
+          git push origin "HEAD:$BRANCH"
+          echo "Merged ${{ steps.merge.outputs.behind }} upstream commit(s) into $BRANCH." >> "$GITHUB_STEP_SUMMARY"
 
-          **Conflicts** in: $conflicts
-          Resolve locally with \`scripts/menubar/sync-upstream.sh\` (keep upstream's code, re-add the menubar hook)."
+      # The workflow token can't push upstream commits that touch
+      # .github/workflows, so anything unfinished becomes an issue and the
+      # merge itself is redone (and pushed) by the Claude routine or a person.
+      - name: Hand anything else to an issue
+        if: >-
+          steps.merge.outputs.behind != '0' && (
+            steps.merge.outputs.result == 'conflict' ||
+            steps.test.outcome == 'failure' ||
+            steps.push.outcome == 'failure')
+        env:
+          RESULT: ${{ steps.merge.outputs.result }}
+          TEST: ${{ steps.test.outcome }}
+          BEHIND: ${{ steps.merge.outputs.behind }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create upstream-sync --color FBCA04 \
+            --description "Upstream merge that needs a person or the Claude routine" 2>/dev/null || true
+          {
+            echo "Handy has $BEHIND new commit(s) (\`$UPSTREAM_SHA\`) that couldn't be merged into \`$BRANCH\` automatically. [Run log]($RUN_URL)"
+            echo
+            if [ "$RESULT" = conflict ]; then
+              echo "**Merge conflicts** in:"
+              sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/conflicts.txt"
+            elif [ "$TEST" = failure ]; then
+              echo "The merge is clean but **the Handy Bar checks fail**:"
+              echo '```'
+              tail -n 60 "$RUNNER_TEMP/test.log"
+              echo '```'
+            else
+              echo "The merge is clean and the checks pass, but **the workflow token couldn't push it** (usually because upstream changed files in \`.github/workflows\`)."
+            fi
+            echo
+            echo "**To finish:** run \`scripts/menubar/sync-upstream.sh\` on \`$BRANCH\`; on conflicts keep upstream's code and re-add Handy Bar's small macOS hooks (see \`docs/menubar/README.md\`); make the checks pass; push; close this issue. The weekly Claude routine does this automatically."
+          } > "$RUNNER_TEMP/body.md"
+          existing=$(gh issue list --label upstream-sync --state open --json number -q '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --label upstream-sync --title "Upstream Handy sync needs attention" --body-file "$RUNNER_TEMP/body.md"
           fi
-          gh pr list --head "$sync" --json number -q '.[0].number' | grep -q . ||
-            gh pr create --base "$BRANCH" --head "$sync" \
-              --title "Sync upstream Handy ($(date +%Y-%m-%d))" --body "$body"
+          echo "Needs attention: see the open upstream-sync issue." >> "$GITHUB_STEP_SUMMARY"
